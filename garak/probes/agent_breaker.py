@@ -24,7 +24,6 @@ import yaml
 
 from garak import _config
 from garak.data import path as data_path
-from garak.exception import GarakException
 import garak._plugins
 import garak.attempt
 import garak.probes
@@ -204,128 +203,52 @@ class AgentBreaker(garak.probes.IterativeProbe):
             self._prompts = yaml.safe_load(f)
 
     def _load_agent_config(self):
-        """Load agent purpose and tools from YAML configuration file"""
-        try:
-            config_file_path = data_path / self.agent_config_file
-        except GarakException as e:
-            msg = f"Agent config file not found: {self.agent_config_file}"
-            logging.error(msg)
-            raise GarakException(msg) from e
+        """Load agent purpose and tools from YAML configuration file."""
+        from garak.resources.recon import load_agent_config
 
-        try:
-            with open(config_file_path, "r", encoding="utf-8") as f:
-                self.agent_config = yaml.safe_load(f)
-        except Exception as e:
-            msg = f"Failed to load agent config from {config_file_path}: {e}"
-            logging.error(msg)
-            raise GarakException(msg) from e
-
-        if not self.agent_config:
-            self.agent_config = {}
-
-        self.agent_config.setdefault("agent_purpose", "")
-        self.agent_config.setdefault("tools", [])
-
+        config_file_path = data_path / self.agent_config_file
+        self.agent_config = load_agent_config(config_file_path)
         logging.info(
-            f"{self.__class__.__name__} # Loaded agent config with "
-            f"{len(self.agent_config['tools'])} tools"
+            "%s # Loaded agent config with %d tools",
+            self.__class__.__name__,
+            len(self.agent_config["tools"]),
         )
 
     def _discover_agent_config(self, generator) -> None:
         """Ask the target agent for its purpose and/or tools, then parse
         with the red team model.
 
-        Only queries for what is missing in self.agent_config:
-        - If agent_purpose is set but tools is empty, ask for tools only.
-        - If both are missing, ask for purpose and tools.
-
-        The discovery prompt is sent to the *target* agent. The response is
-        parsed by the *red team* model into the same dict structure as the
-        YAML config.
+        Delegates to :func:`garak.resources.recon.discover_agent_config`,
+        supplying the probe's parse pipeline as a closure.
         """
-        has_purpose = bool(self.agent_config.get("agent_purpose"))
-        has_tools = bool(self.agent_config.get("tools"))
-
-        if has_tools:
-            return
-
-        if has_purpose:
-            discovery_prompt = self._prompts["DISCOVERY_TOOLS_ONLY"]
-        else:
-            discovery_prompt = self._prompts["DISCOVERY_FULL"]
-
-        logging.info(
-            f"{self.__class__.__name__} # Discovering agent config from "
-            "target agent..."
-        )
-
-        conv = garak.attempt.Conversation(
-            [
-                garak.attempt.Turn(
-                    role="user",
-                    content=garak.attempt.Message(text=discovery_prompt),
-                ),
-            ]
-        )
-        try:
-            response = generator.generate(prompt=conv, generations_this_call=1)
-        except Exception as e:
-            logging.warning(f"{self.__class__.__name__} # Discovery call failed: {e}")
-            return
-
-        if not response or response[0] is None or response[0].text is None:
-            logging.warning(
-                f"{self.__class__.__name__} # Agent returned empty response "
-                "during discovery"
-            )
-            return
-
-        agent_response: str = response[0].text
-
-        if has_purpose:
-            parse_prompt = self._prompts["PARSE_TOOLS_ONLY"].format(
-                agent_response=agent_response,
-            )
-        else:
-            parse_prompt = self._prompts["PARSE_FULL"].format(
-                agent_response=agent_response,
-            )
+        from garak.resources.recon import discover_agent_config
 
         self._setup_parse_model()
-        parsed_text: Optional[str] = self._get_model_response(
-            parse_prompt, model=self.parse_model
-        )
-        if not parsed_text:
-            logging.warning(
-                f"{self.__class__.__name__} # Parse model failed to "
-                "parse discovery response"
-            )
-            return
 
-        try:
-            parsed: dict = self._detector._extract_json(parsed_text)
-        except json.JSONDecodeError as e:
-            logging.warning(
-                f"{self.__class__.__name__} # Failed to parse discovery " f"JSON: {e}"
+        def _parse_fn(prompt: str) -> Optional[dict]:
+            parsed_text: Optional[str] = self._get_model_response(
+                prompt, model=self.parse_model
             )
-            return
-
-        discovered_tools: List[dict] = parsed.get("tools", [])
-        if discovered_tools:
-            self.agent_config["tools"] = discovered_tools
-            logging.info(
-                f"{self.__class__.__name__} # Discovered "
-                f"{len(discovered_tools)} tools from agent"
-            )
-
-        if not has_purpose:
-            discovered_purpose: str = parsed.get("agent_purpose", "")
-            if discovered_purpose:
-                self.agent_config["agent_purpose"] = discovered_purpose
-                logging.info(
-                    f"{self.__class__.__name__} # Discovered agent purpose "
-                    "from agent"
+            if not parsed_text:
+                return None
+            try:
+                return self._detector._extract_json(parsed_text)
+            except json.JSONDecodeError as e:
+                logging.warning(
+                    "%s # Failed to parse discovery JSON: %s",
+                    self.__class__.__name__,
+                    e,
                 )
+                return None
+
+        self.agent_config = discover_agent_config(
+            generator, self.agent_config, self._prompts, _parse_fn
+        )
+        logging.info(
+            "%s # agent_config after discovery: %d tools",
+            self.__class__.__name__,
+            len(self.agent_config.get("tools", [])),
+        )
 
     def _build_tool_configs(self) -> List[Tuple[str, dict]]:
         """Extract per-tool (name, analysis) tuples from agent_analysis.
