@@ -14,7 +14,7 @@ import importlib
 import json
 import logging
 import types
-from typing import List
+from typing import List, Optional
 
 import tqdm
 
@@ -88,6 +88,15 @@ class Harness(Configurable):
 
     DEFAULT_PARAMS = {
         "strict_modality_match": False,
+        # Optional recon phase config.  Set to a dict to enable; None disables.
+        # Supported keys:
+        #   agent_config_path (str): path relative to garak data dir to load a
+        #       static agent config YAML (agent_purpose + tools).
+        #   discover (dict): enable live discovery from the target generator.
+        #       Keys: parse_model_type, parse_model_name, parse_model_config
+        #       (same semantics as AgentBreaker's parse_model_* params).
+        #       Omit to skip live discovery.
+        "recon": None,
     }
 
     def __init__(self, config_root=_config):
@@ -125,6 +134,118 @@ class Harness(Configurable):
                     print(err_msg)
                     logging.warning(err_msg)
                     continue
+
+    def _run_recon(self, model) -> None:
+        """Optional harness-level recon phase.
+
+        Runs before the probe loop. If ``self.recon`` config is present,
+        populates ``model.agent_config`` so that probes can read it from the
+        generator rather than performing their own discovery.
+
+        Plugins executed (in order, each skipped if its config key is absent):
+
+        1. **load** — reads a static agent-config YAML from
+           ``recon.agent_config_path`` (relative to the garak data dir).
+        2. **discover** — asks the target generator about its purpose and
+           tools using the prompts in ``data/agent_breaker/prompts.yaml``.
+           Requires ``recon.discover`` sub-config with ``parse_model_type``
+           and ``parse_model_name``; if absent, live discovery is skipped.
+        """
+        recon_cfg = getattr(self, "recon", None)
+        if not recon_cfg:
+            return
+
+        from garak.data import path as data_path
+        from garak.resources.recon import (
+            discover_agent_config,
+            extract_json,
+            load_agent_config,
+        )
+
+        agent_config: dict = {"agent_purpose": "", "tools": []}
+
+        # Plugin 1: load from disk
+        config_path = recon_cfg.get("agent_config_path")
+        if config_path:
+            try:
+                agent_config = load_agent_config(data_path / config_path)
+            except Exception as e:
+                logging.warning("harness recon: load failed: %s", e)
+
+        # Plugin 2: live discovery (only when tools are still missing)
+        discover_cfg = recon_cfg.get("discover")
+        if not agent_config.get("tools") and discover_cfg:
+            prompts_path = data_path / discover_cfg.get(
+                "prompts_path", "agent_breaker/prompts.yaml"
+            )
+            try:
+                import yaml
+
+                with open(prompts_path, "r", encoding="utf-8") as fh:
+                    prompts = yaml.safe_load(fh)
+            except Exception as e:
+                logging.warning("harness recon: failed to load prompts: %s", e)
+                prompts = None
+
+            if prompts:
+                parse_model_type = discover_cfg.get("parse_model_type")
+                parse_model_name = discover_cfg.get("parse_model_name")
+                parse_model_config = discover_cfg.get("parse_model_config") or {}
+
+                if parse_model_type:
+                    try:
+                        import copy
+
+                        model_root: dict = {"generators": {}}
+                        conf_root = model_root["generators"]
+                        for part in parse_model_type.split("."):
+                            conf_root = conf_root.setdefault(part, {})
+                        conf_root.update(copy.deepcopy(parse_model_config))
+                        if parse_model_name:
+                            conf_root["name"] = parse_model_name
+                        parse_model = _plugins.load_plugin(
+                            f"generators.{parse_model_type}",
+                            config_root=model_root,
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "harness recon: failed to load parse model: %s", e
+                        )
+                        parse_model = None
+                else:
+                    parse_model = None
+
+                def _parse_fn(prompt: str) -> Optional[dict]:
+                    target = parse_model if parse_model is not None else model
+                    conv = garak.attempt.Conversation(
+                        [
+                            garak.attempt.Turn(
+                                role="user",
+                                content=garak.attempt.Message(text=prompt),
+                            )
+                        ]
+                    )
+                    try:
+                        resp = target.generate(prompt=conv, generations_this_call=1)
+                    except Exception as exc:
+                        logging.warning("harness recon: parse call failed: %s", exc)
+                        return None
+                    if not resp or resp[0] is None or resp[0].text is None:
+                        return None
+                    return extract_json(resp[0].text)
+
+                try:
+                    agent_config = discover_agent_config(
+                        model, agent_config, prompts, _parse_fn
+                    )
+                except Exception as e:
+                    logging.warning("harness recon: discover failed: %s", e)
+
+        model.agent_config = agent_config
+        logging.info(
+            "harness recon: placed agent_config on generator (%d tools)",
+            len(agent_config.get("tools", [])),
+        )
 
     def _start_run_hook(self):
         self._http_lib_user_agents = _config.get_http_lib_agents()
@@ -185,6 +306,7 @@ class Harness(Configurable):
             raise ValueError(msg)
 
         self._start_run_hook()
+        self._run_recon(model)
         _emit_plugin_cache_entry(
             self,
             model,

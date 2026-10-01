@@ -12,7 +12,9 @@ wrapper methods). Future consumer: the harness recon phase, which will call
 these functions directly and inject the result as ``generator.tool_manifest``.
 """
 
+import json
 import logging
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -20,6 +22,28 @@ import yaml
 
 import garak.attempt
 from garak.exception import GarakException
+
+
+def extract_json(text: str) -> Optional[dict]:
+    """Extract a JSON object from model output that may include surrounding prose.
+
+    Tries strict ``json.loads`` first, then falls back to finding the first
+    ``{ … }`` block with ``re.DOTALL``.
+
+    :param text: Raw text from a model response.
+    :returns: Parsed dict, or ``None`` if no valid JSON object was found.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def load_agent_config(config_file_path: Path) -> dict:

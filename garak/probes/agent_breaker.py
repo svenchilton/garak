@@ -581,7 +581,12 @@ class AgentBreaker(garak.probes.IterativeProbe):
             # note in theory the generator should be passed in vs accessed on self
             # future iteration may find that `_create_init_attempts` should accept the
             # a generator object for use in `creating` things.
-            self._discover_agent_config(self.generator)
+            harness_config = getattr(self.generator, "agent_config", None)
+            if harness_config and harness_config.get("tools"):
+                # Harness recon phase already discovered tools — use its result.
+                self.agent_config = harness_config
+            else:
+                self._discover_agent_config(self.generator)
 
         if not self.agent_config.get("tools"):
             msg = f"{self.__class__.__name__} # No tools found -- cannot run attack"
