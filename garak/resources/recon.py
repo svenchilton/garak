@@ -12,11 +12,14 @@ wrapper methods). Future consumer: the harness recon phase, which will call
 these functions directly and inject the result as ``generator.tool_manifest``.
 """
 
+import datetime
 import json
 import logging
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import yaml
 
@@ -33,6 +36,8 @@ def extract_json(text: str) -> Optional[dict]:
     :param text: Raw text from a model response.
     :returns: Parsed dict, or ``None`` if no valid JSON object was found.
     """
+    if text is None:
+        return None
     try:
         return json.loads(text)
     except (json.JSONDecodeError, TypeError):
@@ -157,3 +162,226 @@ def discover_agent_config(
             logging.info("recon # Discovered agent purpose from agent")
 
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Generic ToolManifest builder (source-agnostic)
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_KEYWORDS: List[str] = [
+    "secret", "key", "token", "password", "credential",
+    "private", "pii", "personal", "user data",
+]
+_MUTATE_KEYWORDS: List[str] = [
+    "update", "delete", "write", "post", "create", "modify", "remove",
+]
+_EXEC_KEYWORDS: List[str] = [
+    "execute", "run", "eval", "shell", "subprocess", "command",
+]
+_AUTH_KEYWORDS: List[str] = [
+    "auth", "login", "impersonate", "on behalf", "credential",
+]
+
+
+def _keyword_match(text: str, keywords: List[str]) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in keywords)
+
+
+def _has_url_param(tool: dict) -> bool:
+    """Return True if any input parameter looks like an external URL/endpoint."""
+    props = tool.get("inputSchema", {}).get("properties", {})
+    for prop in props.values():
+        if prop.get("format") in ("uri", "url", "hostname"):
+            return True
+        desc = prop.get("description", "").lower()
+        if any(kw in desc for kw in ("url", "endpoint", "webhook", "host")):
+            return True
+    return False
+
+
+def _compute_layer2(tool: dict) -> dict:
+    """Compute Layer 2 garak capability annotations for a single tool entry.
+
+    Heuristics are keyed on description keyword matching and inputSchema
+    structure — they work on any normalised tool dict, not just MCP ones.
+
+    :param tool: Normalised tool dict with at minimum ``name``, ``description``,
+        ``inputSchema``, and ``annotations`` keys.
+    :returns: Dict for the ``garak`` key in a ToolManifest tool entry.
+    """
+    annotations = tool.get("annotations", {})
+    description = tool.get("description", "")
+
+    capability_class: List[str] = []
+
+    if annotations.get("openWorldHint") or _has_url_param(tool):
+        capability_class.append("network_egress")
+    if annotations.get("destructiveHint") or _keyword_match(description, _MUTATE_KEYWORDS):
+        capability_class.append("write_mutate")
+    if (
+        annotations.get("destructiveHint")
+        and not annotations.get("idempotentHint", True)
+        and "irreversible" not in capability_class
+    ):
+        capability_class.append("irreversible")
+    if _keyword_match(description, _SENSITIVE_KEYWORDS):
+        capability_class.append("read_sensitive")
+    if _keyword_match(description, _EXEC_KEYWORDS):
+        capability_class.append("code_exec")
+    if _keyword_match(description, _AUTH_KEYWORDS) and "auth_identity" not in capability_class:
+        capability_class.append("auth_identity")
+
+    is_source = "read_sensitive" in capability_class
+    is_sink = (
+        "network_egress" in capability_class and bool(annotations.get("openWorldHint"))
+    ) or (
+        "write_mutate" in capability_class and _has_url_param(tool)
+    )
+
+    if is_sink and not is_source:
+        max_depth, allowed_successors = 0, []
+    elif is_source:
+        max_depth = 3
+        allowed_successors = [
+            c for c in ["write_mutate", "network_egress", "auth_identity"]
+            if c not in capability_class
+        ]
+    else:
+        max_depth, allowed_successors = 3, []
+
+    return {
+        "capability_class": capability_class,
+        "is_source": is_source,
+        "is_sink": is_sink,
+        "chain_policy": {
+            "max_depth": max_depth,
+            "allowed_successors": allowed_successors,
+        },
+        "probe_relevance": {
+            "A1_ipi_via_tool_results": bool(
+                {"read_sensitive", "network_egress"} & set(capability_class)
+            ),
+            "A2_permission_escalation": bool(
+                {"auth_identity", "write_mutate"} & set(capability_class)
+            ),
+            "A3_tool_chain_abuse": is_source or is_sink,
+            "A5_tool_metadata_poisoning": True,
+        },
+    }
+
+
+def build_tool_manifest(server_info: dict, raw_tools: List[dict]) -> dict:
+    """Build a ToolManifest (Layer 1 + Layer 2) from any normalised tool list.
+
+    ``raw_tools`` is source-agnostic: it may come from MCP ``tools/list``,
+    an OpenAPI spec conversion, a static YAML, or any other enumeration
+    backend, as long as each entry carries ``name``, ``description``,
+    ``inputSchema``, and ``annotations`` keys (all optional except ``name``).
+
+    Layer 3 (Relay telemetry) is a stretch goal and is not populated here.
+
+    :param server_info: Metadata about the tool source — at minimum
+        ``endpoint`` and ``transport`` strings; callers may add any extra
+        fields. Stored verbatim in the ``server`` block of the manifest.
+    :param raw_tools: List of normalised tool dicts.
+    :returns: ToolManifest dict matching the schema in the design doc.
+    """
+    tool_entries = []
+    for t in raw_tools:
+        entry: dict = {
+            "name": t.get("name", ""),
+            "description": t.get("description", ""),
+            "inputSchema": t.get("inputSchema", {}),
+            "annotations": t.get("annotations", {}),
+            "garak": _compute_layer2(t),
+        }
+        tool_entries.append(entry)
+
+    cc = [set(e["garak"]["capability_class"]) for e in tool_entries]
+    return {
+        "server": {
+            **server_info,
+            "enumerated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        },
+        "capability_gate": {
+            "mcp_tool_surface": bool(tool_entries),
+            "tool_count": len(tool_entries),
+            "has_destructive_tools": any(
+                {"write_mutate", "irreversible"} & c for c in cc
+            ),
+            "has_external_egress": any("network_egress" in c for c in cc),
+            "has_read_sensitive": any("read_sensitive" in c for c in cc),
+        },
+        "tools": tool_entries,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MCP enumeration source plugin
+# ---------------------------------------------------------------------------
+
+
+def mcp_enumerate(
+    server_url: str,
+    transport: str = "streamable-http",
+    timeout: float = 30.0,
+) -> List[dict]:
+    """Issue a ``tools/list`` JSON-RPC call to an MCP server.
+
+    Returns the raw tools list from the response — a list of dicts each
+    carrying at minimum ``name`` and ``description``.  Pass the result
+    directly to :func:`build_tool_manifest` together with a ``server_info``
+    dict of your choosing.
+
+    Only HTTP-based transports (``streamable-http``, ``http``) are supported.
+    ``stdio`` agents must be handled by the caller.
+
+    :param server_url: Full URL of the MCP endpoint.
+    :param transport: Transport hint; only HTTP is implemented here.
+    :param timeout: Request timeout in seconds.
+    :returns: List of raw tool dicts from the server.
+    :raises GarakException: On network error, non-2xx response, or invalid JSON.
+    """
+    if transport == "stdio":
+        raise GarakException(
+            "stdio MCP transport requires a running subprocess — "
+            "call mcp_enumerate only for HTTP-based MCP servers."
+        )
+
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}
+    ).encode()
+    req = urllib.request.Request(
+        server_url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise GarakException(
+            f"MCP tools/list returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise GarakException(f"MCP tools/list network error: {exc.reason}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise GarakException(
+            f"MCP tools/list response is not valid JSON: {exc}"
+        ) from exc
+
+    # JSON-RPC 2.0 success: {"jsonrpc": "2.0", "result": {"tools": [...]}, "id": 1}
+    if "error" in data:
+        raise GarakException(f"MCP tools/list JSON-RPC error: {data['error']}")
+
+    tools: List[dict] = data.get("result", {}).get("tools", [])
+    logging.info("recon # MCP enumerated %d tools from %s", len(tools), server_url)
+    return tools

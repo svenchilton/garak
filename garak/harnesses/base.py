@@ -89,13 +89,21 @@ class Harness(Configurable):
     DEFAULT_PARAMS = {
         "strict_modality_match": False,
         # Optional recon phase config.  Set to a dict to enable; None disables.
-        # Supported keys:
-        #   agent_config_path (str): path relative to garak data dir to load a
-        #       static agent config YAML (agent_purpose + tools).
-        #   discover (dict): enable live discovery from the target generator.
+        # Plugins run in order; each is skipped when its config key is absent.
+        #
+        #   agent_config_path (str): path relative to the garak data dir to
+        #       load a static agent config YAML (agent_purpose + tools).
+        #
+        #   discover (dict): live discovery from the target generator.
         #       Keys: parse_model_type, parse_model_name, parse_model_config
-        #       (same semantics as AgentBreaker's parse_model_* params).
-        #       Omit to skip live discovery.
+        #       (same semantics as AgentBreaker's parse_model_* params);
+        #       omit parse_model_* to use the target generator itself.
+        #
+        #   mcp (dict): MCP tool enumeration via tools/list JSON-RPC.
+        #       Keys: server_url (str, required), transport (str, default
+        #       "streamable-http"), timeout (float, default 30.0).
+        #       Sets model.tool_manifest (full ToolManifest with Layer 1+2)
+        #       and model.agent_config (flattened compat view for probes).
         "recon": None,
     }
 
@@ -240,6 +248,38 @@ class Harness(Configurable):
                     )
                 except Exception as e:
                     logging.warning("harness recon: discover failed: %s", e)
+
+        # Plugin 3: MCP tool enumeration
+        mcp_cfg = recon_cfg.get("mcp")
+        if mcp_cfg:
+            from garak.resources.recon import build_tool_manifest, mcp_enumerate
+
+            mcp_url = mcp_cfg.get("server_url")
+            mcp_transport = mcp_cfg.get("transport", "streamable-http")
+            mcp_timeout = float(mcp_cfg.get("timeout", 30.0))
+            if mcp_url:
+                try:
+                    raw_tools = mcp_enumerate(mcp_url, mcp_transport, mcp_timeout)
+                    server_info = {
+                        "endpoint": mcp_url,
+                        "transport": mcp_transport,
+                    }
+                    tool_manifest = build_tool_manifest(server_info, raw_tools)
+                    model.tool_manifest = tool_manifest
+                    if tool_manifest["capability_gate"]["mcp_tool_surface"]:
+                        # Populate agent_config for backward compat with probes
+                        # that read generator.agent_config rather than tool_manifest.
+                        agent_config["tools"] = [
+                            {
+                                "name": t["name"],
+                                "description": t["description"],
+                                "inputSchema": t.get("inputSchema", {}),
+                                "annotations": t.get("annotations", {}),
+                            }
+                            for t in tool_manifest["tools"]
+                        ]
+                except Exception as e:
+                    logging.warning("harness recon: MCP enumeration failed: %s", e)
 
         model.agent_config = agent_config
         logging.info(
