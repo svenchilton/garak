@@ -10,7 +10,7 @@ import pytest
 
 from garak.exception import GarakException
 from garak.resources.recon import (
-    _compute_layer2,
+    _annotate_security,
     _has_url_param,
     _keyword_match,
     build_tool_manifest,
@@ -71,68 +71,66 @@ def test_has_url_param_none():
 
 
 # ---------------------------------------------------------------------------
-# _compute_layer2
+# _annotate_security
 # ---------------------------------------------------------------------------
 
 
-def test_layer2_network_egress_via_open_world():
+def test_annotate_security_network_egress_via_open_world():
     tool = {
         "description": "Fetch a webpage.",
         "annotations": {"openWorldHint": True, "destructiveHint": False, "idempotentHint": True},
         "inputSchema": {},
     }
-    layer2 = _compute_layer2(tool)
-    assert "network_egress" in layer2["capability_class"]
-    assert layer2["is_sink"] is True
-    assert layer2["probe_relevance"]["A1_ipi_via_tool_results"] is True
+    annotations = _annotate_security(tool)
+    assert "network_egress" in annotations["capability_class"]
+    assert annotations["is_sink"] is True
 
 
-def test_layer2_read_sensitive():
+def test_annotate_security_read_sensitive():
     tool = {
         "description": "Read the user's auth token from the store.",
         "annotations": {},
         "inputSchema": {},
     }
-    layer2 = _compute_layer2(tool)
-    assert "read_sensitive" in layer2["capability_class"]
-    assert layer2["is_source"] is True
+    annotations = _annotate_security(tool)
+    assert "read_sensitive" in annotations["capability_class"]
+    assert annotations["is_source"] is True
 
 
-def test_layer2_destructive_and_irreversible():
+def test_annotate_security_destructive_and_irreversible():
     tool = {
         "description": "Delete a file permanently.",
         "annotations": {"destructiveHint": True, "idempotentHint": False},
         "inputSchema": {},
     }
-    layer2 = _compute_layer2(tool)
-    assert "write_mutate" in layer2["capability_class"]
-    assert "irreversible" in layer2["capability_class"]
-    assert layer2["probe_relevance"]["A2_permission_escalation"] is True
+    annotations = _annotate_security(tool)
+    assert "write_mutate" in annotations["capability_class"]
+    assert "irreversible" in annotations["capability_class"]
 
 
-def test_layer2_benign_tool():
+def test_annotate_security_benign_tool():
     tool = {
         "description": "Return the current UTC timestamp.",
         "annotations": {"readOnlyHint": True},
         "inputSchema": {},
     }
-    layer2 = _compute_layer2(tool)
-    assert layer2["capability_class"] == []
-    assert layer2["is_source"] is False
-    assert layer2["is_sink"] is False
-    assert layer2["probe_relevance"]["A5_tool_metadata_poisoning"] is True
+    annotations = _annotate_security(tool)
+    assert annotations["capability_class"] == []
+    assert annotations["is_source"] is False
+    assert annotations["is_sink"] is False
+    assert "probe_relevance" not in annotations
 
 
-def test_layer2_chain_policy_sink_only():
+def test_annotate_security_chain_policy_sink_only():
     tool = {
         "description": "Send an email to recipient.",
         "annotations": {"openWorldHint": True, "idempotentHint": False},
         "inputSchema": {"properties": {"to": {"type": "string", "format": "email"}}},
     }
-    layer2 = _compute_layer2(tool)
-    assert layer2["is_sink"] is True
-    assert layer2["chain_policy"]["max_depth"] == 0
-    assert layer2["chain_policy"]["allowed_successors"] == []
+    annotations = _annotate_security(tool)
+    assert annotations["is_sink"] is True
+    assert annotations["chain_policy"]["max_depth"] == 0
+    assert annotations["chain_policy"]["allowed_successors"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +165,12 @@ def test_build_tool_manifest_structure():
     assert len(manifest["tools"]) == 2
 
 
-def test_build_tool_manifest_layer2_present():
+def test_build_tool_manifest_security_annotations_present():
     manifest = build_tool_manifest({"endpoint": "x", "transport": "http"}, [FETCH_TOOL])
     tool = manifest["tools"][0]
-    assert "garak" in tool
-    assert "capability_class" in tool["garak"]
-    assert "probe_relevance" in tool["garak"]
+    assert "security_annotations" in tool
+    assert "capability_class" in tool["security_annotations"]
+    assert "probe_relevance" not in tool["security_annotations"]
 
 
 def test_build_tool_manifest_empty():

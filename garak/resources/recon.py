@@ -3,13 +3,13 @@
 
 """Agent configuration discovery utilities for Garak's recon phase.
 
-Standalone functions for loading and discovering an agent's purpose and tool
+Standalone functions for loading and discovering a target's purpose and tool
 surface. These are the building blocks for a harness-level recon phase that
-runs before any probe is instantiated and places the result on the generator.
+runs before any probe is instantiated and places the result on the target
+generator as ``target.capabilities``.
 
 Current consumers: :class:`garak.probes.agent_breaker.AgentBreaker` (via thin
-wrapper methods). Future consumer: the harness recon phase, which will call
-these functions directly and inject the result as ``generator.tool_manifest``.
+wrapper methods) and :class:`garak.harnesses.base.Harness` (recon phase).
 """
 
 import datetime
@@ -200,15 +200,15 @@ def _has_url_param(tool: dict) -> bool:
     return False
 
 
-def _compute_layer2(tool: dict) -> dict:
-    """Compute Layer 2 garak capability annotations for a single tool entry.
+def _annotate_security(tool: dict) -> dict:
+    """Compute security capability annotations for a single tool entry.
 
     Heuristics are keyed on description keyword matching and inputSchema
     structure — they work on any normalised tool dict, not just MCP ones.
 
     :param tool: Normalised tool dict with at minimum ``name``, ``description``,
         ``inputSchema``, and ``annotations`` keys.
-    :returns: Dict for the ``garak`` key in a ToolManifest tool entry.
+    :returns: Dict for the ``security_annotations`` key in a ToolManifest tool entry.
     """
     annotations = tool.get("annotations", {})
     description = tool.get("description", "")
@@ -258,16 +258,6 @@ def _compute_layer2(tool: dict) -> dict:
             "max_depth": max_depth,
             "allowed_successors": allowed_successors,
         },
-        "probe_relevance": {
-            "A1_ipi_via_tool_results": bool(
-                {"read_sensitive", "network_egress"} & set(capability_class)
-            ),
-            "A2_permission_escalation": bool(
-                {"auth_identity", "write_mutate"} & set(capability_class)
-            ),
-            "A3_tool_chain_abuse": is_source or is_sink,
-            "A5_tool_metadata_poisoning": True,
-        },
     }
 
 
@@ -294,11 +284,11 @@ def build_tool_manifest(server_info: dict, raw_tools: List[dict]) -> dict:
             "description": t.get("description", ""),
             "inputSchema": t.get("inputSchema", {}),
             "annotations": t.get("annotations", {}),
-            "garak": _compute_layer2(t),
+            "security_annotations": _annotate_security(t),
         }
         tool_entries.append(entry)
 
-    cc = [set(e["garak"]["capability_class"]) for e in tool_entries]
+    cc = [set(e["security_annotations"]["capability_class"]) for e in tool_entries]
     return {
         "server": {
             **server_info,
