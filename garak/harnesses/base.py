@@ -102,8 +102,8 @@ class Harness(Configurable):
         #   mcp (dict): MCP tool enumeration via tools/list JSON-RPC.
         #       Keys: server_url (str, required), transport (str, default
         #       "streamable-http"), timeout (float, default 30.0).
-        #       Sets model.tool_manifest (full ToolManifest with Layer 1+2)
-        #       and model.agent_config (flattened compat view for probes).
+        #       Result is placed on target.capabilities (tool list) and
+        #       target.tool_manifest (full manifest with security annotations).
         "recon": None,
     }
 
@@ -143,11 +143,11 @@ class Harness(Configurable):
                     logging.warning(err_msg)
                     continue
 
-    def _run_recon(self, model) -> None:
+    def _run_recon(self, target) -> None:
         """Optional harness-level recon phase.
 
         Runs before the probe loop. If ``self.recon`` config is present,
-        populates ``model.agent_config`` so that probes can read it from the
+        populates ``target.capabilities`` so that probes can read it from the
         generator rather than performing their own discovery.
 
         Plugins executed (in order, each skipped if its config key is absent):
@@ -158,6 +158,8 @@ class Harness(Configurable):
            tools using the prompts in ``data/agent_breaker/prompts.yaml``.
            Requires ``recon.discover`` sub-config with ``parse_model_type``
            and ``parse_model_name``; if absent, live discovery is skipped.
+        3. **mcp** — issues a ``tools/list`` JSON-RPC call to an MCP server
+           and populates ``target.tool_manifest`` with the annotated result.
         """
         recon_cfg = getattr(self, "recon", None)
         if not recon_cfg:
@@ -170,19 +172,19 @@ class Harness(Configurable):
             load_agent_config,
         )
 
-        agent_config: dict = {"agent_purpose": "", "tools": []}
+        capabilities: dict = {"agent_purpose": "", "tools": []}
 
         # Plugin 1: load from disk
         config_path = recon_cfg.get("agent_config_path")
         if config_path:
             try:
-                agent_config = load_agent_config(data_path / config_path)
+                capabilities = load_agent_config(data_path / config_path)
             except Exception as e:
                 logging.warning("harness recon: load failed: %s", e)
 
         # Plugin 2: live discovery (only when tools are still missing)
         discover_cfg = recon_cfg.get("discover")
-        if not agent_config.get("tools") and discover_cfg:
+        if not capabilities.get("tools") and discover_cfg:
             prompts_path = data_path / discover_cfg.get(
                 "prompts_path", "agent_breaker/prompts.yaml"
             )
@@ -204,27 +206,27 @@ class Harness(Configurable):
                     try:
                         import copy
 
-                        model_root: dict = {"generators": {}}
-                        conf_root = model_root["generators"]
+                        generator_root: dict = {"generators": {}}
+                        conf_root = generator_root["generators"]
                         for part in parse_model_type.split("."):
                             conf_root = conf_root.setdefault(part, {})
                         conf_root.update(copy.deepcopy(parse_model_config))
                         if parse_model_name:
                             conf_root["name"] = parse_model_name
-                        parse_model = _plugins.load_plugin(
+                        parse_generator = _plugins.load_plugin(
                             f"generators.{parse_model_type}",
-                            config_root=model_root,
+                            config_root=generator_root,
                         )
                     except Exception as e:
                         logging.warning(
-                            "harness recon: failed to load parse model: %s", e
+                            "harness recon: failed to load parse generator: %s", e
                         )
-                        parse_model = None
+                        parse_generator = None
                 else:
-                    parse_model = None
+                    parse_generator = None
 
                 def _parse_fn(prompt: str) -> Optional[dict]:
-                    target = parse_model if parse_model is not None else model
+                    gen = parse_generator if parse_generator is not None else target
                     conv = garak.attempt.Conversation(
                         [
                             garak.attempt.Turn(
@@ -234,7 +236,7 @@ class Harness(Configurable):
                         ]
                     )
                     try:
-                        resp = target.generate(prompt=conv, generations_this_call=1)
+                        resp = gen.generate(prompt=conv, generations_this_call=1)
                     except Exception as exc:
                         logging.warning("harness recon: parse call failed: %s", exc)
                         return None
@@ -243,8 +245,8 @@ class Harness(Configurable):
                     return extract_json(resp[0].text)
 
                 try:
-                    agent_config = discover_agent_config(
-                        model, agent_config, prompts, _parse_fn
+                    capabilities = discover_agent_config(
+                        target, capabilities, prompts, _parse_fn
                     )
                 except Exception as e:
                     logging.warning("harness recon: discover failed: %s", e)
@@ -265,11 +267,9 @@ class Harness(Configurable):
                         "transport": mcp_transport,
                     }
                     tool_manifest = build_tool_manifest(server_info, raw_tools)
-                    model.tool_manifest = tool_manifest
+                    target.tool_manifest = tool_manifest
                     if tool_manifest["capability_gate"]["mcp_tool_surface"]:
-                        # Populate agent_config for backward compat with probes
-                        # that read generator.agent_config rather than tool_manifest.
-                        agent_config["tools"] = [
+                        capabilities["tools"] = [
                             {
                                 "name": t["name"],
                                 "description": t["description"],
@@ -281,10 +281,10 @@ class Harness(Configurable):
                 except Exception as e:
                     logging.warning("harness recon: MCP enumeration failed: %s", e)
 
-        model.agent_config = agent_config
+        target.capabilities = capabilities
         logging.info(
-            "harness recon: placed agent_config on generator (%d tools)",
-            len(agent_config.get("tools", [])),
+            "harness recon: placed capabilities on target (%d tools)",
+            len(capabilities.get("tools", [])),
         )
 
     def _start_run_hook(self):
