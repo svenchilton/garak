@@ -143,149 +143,42 @@ class Harness(Configurable):
                     logging.warning(err_msg)
                     continue
 
-    def _run_recon(self, target) -> None:
+    def _run_recon(self, target) -> "Optional[object]":
         """Optional harness-level recon phase.
 
-        Runs before the probe loop. If ``self.recon`` config is present,
-        populates ``target.capabilities`` so that probes can read it from the
-        generator rather than performing their own discovery.
+        Runs each applicable :class:`~garak.resources.recon.ReconPlugin` in
+        priority order (file → MCP → discover) and merges their results into
+        a single :class:`~garak.resources.recon.TargetCapabilities` object,
+        which is returned without mutating *target*.  The caller is
+        responsible for placing the result on the target.
 
-        Plugins executed (in order, each skipped if its config key is absent):
-
-        1. **load** — reads a static agent-config YAML from
-           ``recon.agent_config_path`` (relative to the garak data dir).
-        2. **discover** — asks the target generator about its purpose and
-           tools using the prompts in ``data/agent_breaker/prompts.yaml``.
-           Requires ``recon.discover`` sub-config with ``parse_model_type``
-           and ``parse_model_name``; if absent, live discovery is skipped.
-        3. **mcp** — issues a ``tools/list`` JSON-RPC call to an MCP server
-           and populates ``target.tool_manifest`` with the annotated result.
+        Returns ``None`` when recon is disabled or yields no information.
         """
         recon_cfg = getattr(self, "recon", None)
         if not recon_cfg:
-            return
+            return None
 
-        from garak.data import path as data_path
         from garak.resources.recon import (
-            discover_agent_config,
-            extract_json,
-            load_agent_config,
+            DiscoverReconPlugin,
+            FileReconPlugin,
+            MCPReconPlugin,
+            TargetCapabilities,
         )
 
-        capabilities: dict = {"agent_purpose": "", "tools": []}
+        accumulated = TargetCapabilities()
+        for plugin_cls in (FileReconPlugin, MCPReconPlugin, DiscoverReconPlugin):
+            if not plugin_cls.applicable(recon_cfg):
+                continue
+            result = plugin_cls().run(target, recon_cfg, accumulated)
+            if result is not None:
+                accumulated = accumulated.merge(result)
 
-        # Plugin 1: load from disk
-        config_path = recon_cfg.get("agent_config_path")
-        if config_path:
-            try:
-                capabilities = load_agent_config(data_path / config_path)
-            except Exception as e:
-                logging.warning("harness recon: load failed: %s", e)
-
-        # Plugin 2: live discovery (only when tools are still missing)
-        discover_cfg = recon_cfg.get("discover")
-        if not capabilities.get("tools") and discover_cfg:
-            prompts_path = data_path / discover_cfg.get(
-                "prompts_path", "agent_breaker/prompts.yaml"
-            )
-            try:
-                import yaml
-
-                with open(prompts_path, "r", encoding="utf-8") as fh:
-                    prompts = yaml.safe_load(fh)
-            except Exception as e:
-                logging.warning("harness recon: failed to load prompts: %s", e)
-                prompts = None
-
-            if prompts:
-                parse_model_type = discover_cfg.get("parse_model_type")
-                parse_model_name = discover_cfg.get("parse_model_name")
-                parse_model_config = discover_cfg.get("parse_model_config") or {}
-
-                if parse_model_type:
-                    try:
-                        import copy
-
-                        generator_root: dict = {"generators": {}}
-                        conf_root = generator_root["generators"]
-                        for part in parse_model_type.split("."):
-                            conf_root = conf_root.setdefault(part, {})
-                        conf_root.update(copy.deepcopy(parse_model_config))
-                        if parse_model_name:
-                            conf_root["name"] = parse_model_name
-                        parse_generator = _plugins.load_plugin(
-                            f"generators.{parse_model_type}",
-                            config_root=generator_root,
-                        )
-                    except Exception as e:
-                        logging.warning(
-                            "harness recon: failed to load parse generator: %s", e
-                        )
-                        parse_generator = None
-                else:
-                    parse_generator = None
-
-                def _parse_fn(prompt: str) -> Optional[dict]:
-                    gen = parse_generator if parse_generator is not None else target
-                    conv = garak.attempt.Conversation(
-                        [
-                            garak.attempt.Turn(
-                                role="user",
-                                content=garak.attempt.Message(text=prompt),
-                            )
-                        ]
-                    )
-                    try:
-                        resp = gen.generate(prompt=conv, generations_this_call=1)
-                    except Exception as exc:
-                        logging.warning("harness recon: parse call failed: %s", exc)
-                        return None
-                    if not resp or resp[0] is None or resp[0].text is None:
-                        return None
-                    return extract_json(resp[0].text)
-
-                try:
-                    capabilities = discover_agent_config(
-                        target, capabilities, prompts, _parse_fn
-                    )
-                except Exception as e:
-                    logging.warning("harness recon: discover failed: %s", e)
-
-        # Plugin 3: MCP tool enumeration
-        mcp_cfg = recon_cfg.get("mcp")
-        if mcp_cfg:
-            from garak.resources.recon import build_tool_manifest, mcp_enumerate
-
-            mcp_url = mcp_cfg.get("server_url")
-            mcp_transport = mcp_cfg.get("transport", "streamable-http")
-            mcp_timeout = float(mcp_cfg.get("timeout", 30.0))
-            if mcp_url:
-                try:
-                    raw_tools = mcp_enumerate(mcp_url, mcp_transport, mcp_timeout)
-                    server_info = {
-                        "endpoint": mcp_url,
-                        "transport": mcp_transport,
-                    }
-                    tool_manifest = build_tool_manifest(server_info, raw_tools)
-                    target.tool_manifest = tool_manifest
-                    if tool_manifest["capability_gate"]["mcp_tool_surface"]:
-                        capabilities["tools"] = [
-                            {
-                                "name": t["name"],
-                                "description": t["description"],
-                                "inputSchema": t.get("inputSchema", {}),
-                                "annotations": t.get("annotations", {}),
-                            }
-                            for t in tool_manifest["tools"]
-                        ]
-                except Exception as e:
-                    logging.warning("harness recon: MCP enumeration failed: %s", e)
-
-        target.capabilities = capabilities
+        if not accumulated.has_tools() and not accumulated.purpose:
+            return None
         logging.info(
-            "harness recon: placed capabilities on target (%d tools)",
-            len(capabilities.get("tools", [])),
+            "harness recon: gathered capabilities (%d tools)", len(accumulated.tools)
         )
+        return accumulated
 
     def _start_run_hook(self):
         self._http_lib_user_agents = _config.get_http_lib_agents()
@@ -346,7 +239,11 @@ class Harness(Configurable):
             raise ValueError(msg)
 
         self._start_run_hook()
-        self._run_recon(model)
+        _caps = self._run_recon(model)
+        if _caps is not None:
+            model.capabilities = _caps
+            if _caps.tool_manifest is not None:
+                model.tool_manifest = _caps.tool_manifest
         _emit_plugin_cache_entry(
             self,
             model,

@@ -18,6 +18,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -375,3 +376,244 @@ def mcp_enumerate(
     tools: List[dict] = data.get("result", {}).get("tools", [])
     logging.info("recon # MCP enumerated %d tools from %s", len(tools), server_url)
     return tools
+
+
+# ---------------------------------------------------------------------------
+# Capability container
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TargetCapabilities:
+    """Encapsulates what the recon phase has learned about a target.
+
+    Returned by :class:`ReconPlugin` implementations and accumulated by the
+    harness before being placed on the target generator as
+    ``generator.capabilities``.
+    """
+
+    purpose: str = ""
+    tools: List[dict] = field(default_factory=list)
+    # Full annotated manifest produced by MCPReconPlugin; None for other sources.
+    tool_manifest: Optional[dict] = None
+
+    def has_tools(self) -> bool:
+        """Return True if at least one tool has been discovered."""
+        return bool(self.tools)
+
+    def merge(self, other: "TargetCapabilities") -> "TargetCapabilities":
+        """Return a new TargetCapabilities combining self with other.
+
+        *other*'s non-empty fields take precedence over self's, so later
+        plugins in the priority list can refine earlier results.
+        """
+        return TargetCapabilities(
+            purpose=other.purpose or self.purpose,
+            tools=other.tools if other.tools else self.tools,
+            tool_manifest=(
+                other.tool_manifest
+                if other.tool_manifest is not None
+                else self.tool_manifest
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Recon plugin base and concrete implementations
+# ---------------------------------------------------------------------------
+
+
+class ReconPlugin:
+    """Base class for recon source plugins.
+
+    Each subclass encapsulates one way of gathering capability information
+    about a target: from a static file, via MCP enumeration, or by asking
+    the target agent directly.  The harness runs plugins in priority order
+    and merges their results into a single :class:`TargetCapabilities`.
+    """
+
+    @classmethod
+    def applicable(cls, recon_cfg: dict) -> bool:
+        """Return True if *recon_cfg* contains enough config to attempt a run."""
+        raise NotImplementedError
+
+    def run(
+        self,
+        target,
+        recon_cfg: dict,
+        current: TargetCapabilities,
+    ) -> Optional[TargetCapabilities]:
+        """Gather capabilities about *target* and return the result.
+
+        :param target: The target generator under test.
+        :param recon_cfg: The ``recon`` config dict from the harness.
+        :param current: Capabilities accumulated so far; use to avoid
+            redundant work (e.g. skip discovery when tools already known).
+        :returns: Newly gathered :class:`TargetCapabilities`, or ``None``
+            when this plugin found nothing or chose to skip.
+        """
+        raise NotImplementedError
+
+
+class FileReconPlugin(ReconPlugin):
+    """Load target purpose and tools from a static YAML file."""
+
+    @classmethod
+    def applicable(cls, recon_cfg: dict) -> bool:
+        return bool(recon_cfg.get("agent_config_path"))
+
+    def run(
+        self,
+        target,
+        recon_cfg: dict,
+        current: TargetCapabilities,
+    ) -> Optional[TargetCapabilities]:
+        from garak.data import path as data_path
+
+        config_path = recon_cfg["agent_config_path"]
+        try:
+            cfg = load_agent_config(data_path / config_path)
+            return TargetCapabilities(
+                purpose=cfg.get("agent_purpose", ""),
+                tools=cfg.get("tools", []),
+            )
+        except Exception as exc:
+            logging.warning("recon FileReconPlugin: %s", exc)
+            return None
+
+
+class MCPReconPlugin(ReconPlugin):
+    """Enumerate tools from an MCP server via a tools/list JSON-RPC call."""
+
+    @classmethod
+    def applicable(cls, recon_cfg: dict) -> bool:
+        return bool(recon_cfg.get("mcp", {}).get("server_url"))
+
+    def run(
+        self,
+        target,
+        recon_cfg: dict,
+        current: TargetCapabilities,
+    ) -> Optional[TargetCapabilities]:
+        mcp_cfg = recon_cfg["mcp"]
+        mcp_url = mcp_cfg["server_url"]
+        mcp_transport = mcp_cfg.get("transport", "streamable-http")
+        mcp_timeout = float(mcp_cfg.get("timeout", 30.0))
+        try:
+            raw_tools = mcp_enumerate(mcp_url, mcp_transport, mcp_timeout)
+            tool_manifest = build_tool_manifest(
+                {"endpoint": mcp_url, "transport": mcp_transport}, raw_tools
+            )
+            tools = [
+                {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "inputSchema": t.get("inputSchema", {}),
+                    "annotations": t.get("annotations", {}),
+                }
+                for t in tool_manifest["tools"]
+            ]
+            return TargetCapabilities(tools=tools, tool_manifest=tool_manifest)
+        except Exception as exc:
+            logging.warning("recon MCPReconPlugin: %s", exc)
+            return None
+
+
+class DiscoverReconPlugin(ReconPlugin):
+    """Ask the target agent about its purpose and tools.
+
+    Skipped automatically when the accumulated :class:`TargetCapabilities`
+    already contains tools, to avoid unnecessary (and potentially slow)
+    model calls.
+    """
+
+    @classmethod
+    def applicable(cls, recon_cfg: dict) -> bool:
+        return bool(recon_cfg.get("discover"))
+
+    def run(
+        self,
+        target,
+        recon_cfg: dict,
+        current: TargetCapabilities,
+    ) -> Optional[TargetCapabilities]:
+        if current.has_tools():
+            logging.info("recon DiscoverReconPlugin: tools already known, skipping")
+            return None
+
+        discover_cfg = recon_cfg["discover"]
+        from garak.data import path as data_path
+        import yaml
+
+        prompts_path = data_path / discover_cfg.get(
+            "prompts_path", "agent_breaker/prompts.yaml"
+        )
+        try:
+            with open(prompts_path, "r", encoding="utf-8") as fh:
+                prompts = yaml.safe_load(fh)
+        except Exception as exc:
+            logging.warning("recon DiscoverReconPlugin: failed to load prompts: %s", exc)
+            return None
+
+        parse_generator = self._load_parse_generator(discover_cfg)
+
+        def _parse_fn(prompt: str) -> Optional[dict]:
+            gen = parse_generator if parse_generator is not None else target
+            conv = garak.attempt.Conversation(
+                [
+                    garak.attempt.Turn(
+                        role="user",
+                        content=garak.attempt.Message(text=prompt),
+                    )
+                ]
+            )
+            try:
+                resp = gen.generate(prompt=conv, generations_this_call=1)
+            except Exception as exc:
+                logging.warning("recon DiscoverReconPlugin: parse call failed: %s", exc)
+                return None
+            if not resp or resp[0] is None or resp[0].text is None:
+                return None
+            return extract_json(resp[0].text)
+
+        current_dict = {"agent_purpose": current.purpose, "tools": current.tools}
+        try:
+            updated = discover_agent_config(target, current_dict, prompts, _parse_fn)
+        except Exception as exc:
+            logging.warning("recon DiscoverReconPlugin: discovery failed: %s", exc)
+            return None
+
+        if updated is current_dict:
+            return None
+        return TargetCapabilities(
+            purpose=updated.get("agent_purpose", ""),
+            tools=updated.get("tools", []),
+        )
+
+    def _load_parse_generator(self, discover_cfg: dict):
+        """Instantiate the parse generator when configured; returns None to use target."""
+        import copy
+        from garak import _plugins
+
+        parse_model_type = discover_cfg.get("parse_model_type")
+        if not parse_model_type:
+            return None
+        parse_model_name = discover_cfg.get("parse_model_name")
+        parse_model_config = discover_cfg.get("parse_model_config") or {}
+        try:
+            generator_root: dict = {"generators": {}}
+            conf_root = generator_root["generators"]
+            for part in parse_model_type.split("."):
+                conf_root = conf_root.setdefault(part, {})
+            conf_root.update(copy.deepcopy(parse_model_config))
+            if parse_model_name:
+                conf_root["name"] = parse_model_name
+            return _plugins.load_plugin(
+                f"generators.{parse_model_type}",
+                config_root=generator_root,
+            )
+        except Exception as exc:
+            logging.warning(
+                "recon DiscoverReconPlugin: failed to load parse generator: %s", exc
+            )
+            return None
