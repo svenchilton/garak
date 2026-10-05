@@ -146,11 +146,16 @@ class Harness(Configurable):
     def _run_recon(self, target) -> "Optional[object]":
         """Optional harness-level recon phase.
 
-        Runs each applicable :class:`~garak.resources.recon.ReconPlugin` in
-        priority order (file → MCP → discover) and merges their results into
-        a single :class:`~garak.resources.recon.TargetCapabilities` object,
-        which is returned without mutating *target*.  The caller is
-        responsible for placing the result on the target.
+        Discovers all :class:`~garak.resources.recon.ReconPlugin` subclasses
+        at runtime via ``pkgutil.iter_modules``, instantiates each with the
+        harness ``recon`` config, runs the applicable ones in priority order,
+        and merges their results into a single
+        :class:`~garak.resources.recon.TargetCapabilities` object.  The result
+        is returned without mutating *target*; the caller places it on the
+        target.
+
+        Adding a new plugin requires only a new module file in
+        ``garak.resources.recon`` — no changes here.
 
         Returns ``None`` when recon is disabled or yields no information.
         """
@@ -158,18 +163,33 @@ class Harness(Configurable):
         if not recon_cfg:
             return None
 
-        from garak.resources.recon import (
-            DiscoverReconPlugin,
-            FileReconPlugin,
-            MCPReconPlugin,
-            TargetCapabilities,
-        )
+        import importlib
+        import inspect
+        import pkgutil
+
+        import garak.resources.recon as _recon_pkg
+        from garak.resources.recon.base import ReconPlugin, TargetCapabilities
+
+        plugin_classes = []
+        for _finder, modname, _ispkg in pkgutil.iter_modules(_recon_pkg.__path__):
+            if modname == "base":
+                continue
+            mod = importlib.import_module(f"garak.resources.recon.{modname}")
+            for _name, cls in inspect.getmembers(mod, inspect.isclass):
+                if (
+                    issubclass(cls, ReconPlugin)
+                    and cls is not ReconPlugin
+                    and cls not in plugin_classes
+                ):
+                    plugin_classes.append(cls)
+        plugin_classes.sort(key=lambda c: getattr(c, "priority", 50))
 
         accumulated = TargetCapabilities()
-        for plugin_cls in (FileReconPlugin, MCPReconPlugin, DiscoverReconPlugin):
-            if not plugin_cls.applicable(recon_cfg):
+        for plugin_cls in plugin_classes:
+            plugin = plugin_cls(recon_cfg)
+            if not plugin.applicable():
                 continue
-            result = plugin_cls().run(target, recon_cfg, accumulated)
+            result = plugin.run(target, accumulated)
             if result is not None:
                 accumulated = accumulated.merge(result)
 

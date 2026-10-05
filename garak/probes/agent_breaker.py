@@ -161,9 +161,6 @@ class AgentBreaker(garak.probes.IterativeProbe):
             "max_tokens": 8192,
             "suppressed_params": ["stop"],
         },
-        "parse_model_type": None,
-        "parse_model_name": None,
-        "parse_model_config": None,
         "end_condition": "verify",
         "max_calls_per_conv": 50,
         # Path to agent configuration YAML file (relative to garak/data/)
@@ -176,8 +173,7 @@ class AgentBreaker(garak.probes.IterativeProbe):
 
     def __init__(self, config_root=_config):
         self.red_team_model = None
-        self.parse_model = None
-        self.agent_config = None
+        self.agent_config = {"agent_purpose": "", "tools": []}
         self.agent_analysis = None
         super().__init__(config_root=config_root)
         # Shared detector instance — used for in-loop verification so the
@@ -191,63 +187,13 @@ class AgentBreaker(garak.probes.IterativeProbe):
                 f"{self.__class__.__name__} probe currently does not support languages other than {self.lang}"
             )
 
-        # Load prompt templates and agent configuration from YAML
         self._load_prompts()
-        self._load_agent_config()
 
     def _load_prompts(self):
         """Load prompt templates from the prompts YAML file."""
         prompts_path = data_path / "agent_breaker" / "prompts.yaml"
         with open(prompts_path, "r", encoding="utf-8") as f:
             self._prompts = yaml.safe_load(f)
-
-    def _load_agent_config(self):
-        """Load agent purpose and tools from YAML configuration file."""
-        from garak.resources.recon import load_agent_config
-
-        config_file_path = data_path / self.agent_config_file
-        self.agent_config = load_agent_config(config_file_path)
-        logging.info(
-            "%s # Loaded agent config with %d tools",
-            self.__class__.__name__,
-            len(self.agent_config["tools"]),
-        )
-
-    def _discover_agent_config(self, generator) -> None:
-        """Ask the target agent for its purpose and/or tools, then parse
-        with the red team model.
-
-        Delegates to :func:`garak.resources.recon.discover_agent_config`,
-        supplying the probe's parse pipeline as a closure.
-        """
-        from garak.resources.recon import discover_agent_config
-
-        self._setup_parse_model()
-
-        def _parse_fn(prompt: str) -> Optional[dict]:
-            parsed_text: Optional[str] = self._get_model_response(
-                prompt, model=self.parse_model
-            )
-            if not parsed_text:
-                return None
-            try:
-                return self._detector._extract_json(parsed_text)
-            except json.JSONDecodeError as e:
-                logging.warning(
-                    "%s # Failed to parse discovery JSON: %s",
-                    self.__class__.__name__,
-                    e,
-                )
-                return None
-
-        self.agent_config = discover_agent_config(
-            generator, self.agent_config, self._prompts, _parse_fn
-        )
-        logging.info(
-            "%s # agent_config after discovery: %d tools",
-            self.__class__.__name__,
-            len(self.agent_config.get("tools", [])),
-        )
 
     def _build_tool_configs(self) -> List[Tuple[str, dict]]:
         """Extract per-tool (name, analysis) tuples from agent_analysis.
@@ -327,24 +273,6 @@ class AgentBreaker(garak.probes.IterativeProbe):
             self.red_team_model_type,
             self.red_team_model_name,
             self.red_team_model_config,
-        )
-
-    def _setup_parse_model(self):
-        """Load a separate model for parsing discovery responses.
-
-        Falls back to the red team model when ``parse_model_type`` is
-        not configured.
-        """
-        if self.parse_model is not None:
-            return
-        if not self.parse_model_type:
-            self.parse_model = self.red_team_model
-            return
-        logging.debug(f"{self.__class__.__name__} # Setting up parse model")
-        self.parse_model = self._load_model(
-            self.parse_model_type,
-            self.parse_model_name,
-            self.parse_model_config,
         )
 
     def _get_model_response(self, prompt: str, model=None) -> Optional[str]:
@@ -585,10 +513,8 @@ class AgentBreaker(garak.probes.IterativeProbe):
                 # Harness recon phase already populated target.capabilities — use it.
                 self.agent_config = {
                     "agent_purpose": capabilities.purpose,
-                    "tools": capabilities.tools,
+                    "tools": [t.to_dict() for t in capabilities.tools],
                 }
-            else:
-                self._discover_agent_config(self.generator)
 
         if not self.agent_config.get("tools"):
             msg = f"{self.__class__.__name__} # No tools found -- cannot run attack"

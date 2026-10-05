@@ -21,7 +21,9 @@ from garak.resources.recon import (
     DiscoverReconPlugin,
     FileReconPlugin,
     MCPReconPlugin,
+    SecurityAnnotations,
     TargetCapabilities,
+    ToolDefinition,
 )
 
 
@@ -319,6 +321,89 @@ def test_discover_returns_unchanged_on_empty_response():
 
 
 # ---------------------------------------------------------------------------
+# SecurityAnnotations dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_security_annotations_defaults():
+    sa = SecurityAnnotations()
+    assert sa.capability_class == []
+    assert sa.is_source is False
+    assert sa.is_sink is False
+    assert sa.chain_policy == {}
+
+
+def test_security_annotations_roundtrip():
+    sa = SecurityAnnotations(
+        capability_class=["network_egress"],
+        is_source=True,
+        is_sink=False,
+        chain_policy={"max_depth": 3, "allowed_successors": []},
+    )
+    d = sa.to_dict()
+    sa2 = SecurityAnnotations.from_dict(d)
+    assert sa2.capability_class == ["network_egress"]
+    assert sa2.is_source is True
+    assert sa2.chain_policy["max_depth"] == 3
+
+
+# ---------------------------------------------------------------------------
+# ToolDefinition dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_tool_definition_defaults():
+    td = ToolDefinition()
+    assert td.name == ""
+    assert td.description == ""
+    assert td.input_schema == {}
+    assert td.annotations == {}
+    assert isinstance(td.security_annotations, SecurityAnnotations)
+
+
+def test_tool_definition_to_dict():
+    td = ToolDefinition(name="fetch", description="Gets a URL")
+    d = td.to_dict()
+    assert d["name"] == "fetch"
+    assert d["description"] == "Gets a URL"
+    assert "inputSchema" in d  # camelCase in wire format
+    assert "security_annotations" in d
+
+
+def test_tool_definition_from_dict_camel_case():
+    raw = {
+        "name": "send_email",
+        "description": "Sends email",
+        "inputSchema": {"properties": {"to": {"type": "string"}}},
+        "annotations": {"openWorldHint": True},
+        "security_annotations": {
+            "capability_class": ["network_egress"],
+            "is_source": False,
+            "is_sink": True,
+            "chain_policy": {},
+        },
+    }
+    td = ToolDefinition.from_dict(raw)
+    assert td.name == "send_email"
+    assert td.input_schema == raw["inputSchema"]
+    assert td.security_annotations.is_sink is True
+    assert "network_egress" in td.security_annotations.capability_class
+
+
+def test_tool_definition_roundtrip():
+    td = ToolDefinition(
+        name="exec_code",
+        description="Runs code",
+        input_schema={"properties": {"code": {"type": "string"}}},
+        security_annotations=SecurityAnnotations(capability_class=["code_exec"]),
+    )
+    td2 = ToolDefinition.from_dict(td.to_dict())
+    assert td2.name == td.name
+    assert td2.input_schema == td.input_schema
+    assert td2.security_annotations.capability_class == ["code_exec"]
+
+
+# ---------------------------------------------------------------------------
 # TargetCapabilities
 # ---------------------------------------------------------------------------
 
@@ -335,7 +420,7 @@ def test_target_capabilities_has_tools_false():
 
 
 def test_target_capabilities_has_tools_true():
-    caps = TargetCapabilities(tools=[{"name": "do_thing"}])
+    caps = TargetCapabilities(tools=[ToolDefinition(name="do_thing")])
     assert caps.has_tools(), "non-empty tools → has_tools() is True"
 
 
@@ -354,8 +439,8 @@ def test_target_capabilities_merge_purpose_keeps_base_when_other_empty():
 
 
 def test_target_capabilities_merge_tools_from_other():
-    tools_a = [{"name": "a"}]
-    tools_b = [{"name": "b"}]
+    tools_a = [ToolDefinition(name="a")]
+    tools_b = [ToolDefinition(name="b")]
     base = TargetCapabilities(tools=tools_a)
     other = TargetCapabilities(tools=tools_b)
     merged = base.merge(other)
@@ -363,7 +448,7 @@ def test_target_capabilities_merge_tools_from_other():
 
 
 def test_target_capabilities_merge_keeps_base_tools_when_other_empty():
-    tools_a = [{"name": "a"}]
+    tools_a = [ToolDefinition(name="a")]
     base = TargetCapabilities(tools=tools_a)
     other = TargetCapabilities(tools=[])
     merged = base.merge(other)
@@ -383,36 +468,36 @@ def test_target_capabilities_merge_tool_manifest():
 
 
 # ---------------------------------------------------------------------------
-# Plugin applicability
+# Plugin applicability — instance method pattern
 # ---------------------------------------------------------------------------
 
 
 def test_file_plugin_applicable_with_path():
-    assert FileReconPlugin.applicable({"agent_config_path": "some/path.yaml"})
+    assert FileReconPlugin({"agent_config_path": "some/path.yaml"}).applicable()
 
 
 def test_file_plugin_not_applicable_without_path():
-    assert not FileReconPlugin.applicable({})
+    assert not FileReconPlugin({}).applicable()
 
 
 def test_mcp_plugin_applicable_with_server_url():
-    assert MCPReconPlugin.applicable({"mcp": {"server_url": "http://agent:8080/mcp"}})
+    assert MCPReconPlugin({"mcp": {"server_url": "http://agent:8080/mcp"}}).applicable()
 
 
 def test_mcp_plugin_not_applicable_without_mcp():
-    assert not MCPReconPlugin.applicable({})
+    assert not MCPReconPlugin({}).applicable()
 
 
 def test_mcp_plugin_not_applicable_without_server_url():
-    assert not MCPReconPlugin.applicable({"mcp": {}})
+    assert not MCPReconPlugin({"mcp": {}}).applicable()
 
 
 def test_discover_plugin_applicable():
-    assert DiscoverReconPlugin.applicable({"discover": {"parse_model_type": "nim"}})
+    assert DiscoverReconPlugin({"discover": {"parse_model_type": "nim"}}).applicable()
 
 
 def test_discover_plugin_not_applicable():
-    assert not DiscoverReconPlugin.applicable({})
+    assert not DiscoverReconPlugin({}).applicable()
 
 
 # ---------------------------------------------------------------------------
@@ -425,18 +510,18 @@ def test_file_plugin_run_success(tmp_path):
     cfg.write_text("agent_purpose: My bot\ntools:\n- name: fetch\n  description: Get data\n")
 
     with patch("garak.data.path", tmp_path):
-        plugin = FileReconPlugin()
-        result = plugin.run(None, {"agent_config_path": "agent.yaml"}, TargetCapabilities())
+        plugin = FileReconPlugin({"agent_config_path": "agent.yaml"})
+        result = plugin.run(None, TargetCapabilities())
 
     assert result is not None, "FileReconPlugin should return TargetCapabilities on success"
     assert result.purpose == "My bot"
-    assert result.tools[0]["name"] == "fetch"
+    assert result.tools[0].name == "fetch"
 
 
 def test_file_plugin_run_missing_file(tmp_path):
     with patch("garak.data.path", tmp_path):
-        plugin = FileReconPlugin()
-        result = plugin.run(None, {"agent_config_path": "nonexistent.yaml"}, TargetCapabilities())
+        plugin = FileReconPlugin({"agent_config_path": "nonexistent.yaml"})
+        result = plugin.run(None, TargetCapabilities())
     assert result is None, "FileReconPlugin should return None on missing file"
 
 
@@ -457,11 +542,11 @@ def test_mcp_plugin_run_success():
 
     recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = MCPReconPlugin().run(None, recon_cfg, TargetCapabilities())
+        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
 
     assert result is not None, "MCPReconPlugin should return TargetCapabilities on success"
     assert result.has_tools(), "MCPReconPlugin result should have tools"
-    assert result.tools[0]["name"] == "get_data"
+    assert result.tools[0].name == "get_data"
     assert result.tool_manifest is not None
 
 
@@ -469,7 +554,7 @@ def test_mcp_plugin_run_network_error():
     import urllib.error
     recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
-        result = MCPReconPlugin().run(None, recon_cfg, TargetCapabilities())
+        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
     assert result is None, "MCPReconPlugin should return None on network error"
 
 
@@ -479,6 +564,6 @@ def test_mcp_plugin_run_network_error():
 
 
 def test_discover_plugin_skips_when_tools_present():
-    current = TargetCapabilities(tools=[{"name": "existing_tool"}])
-    result = DiscoverReconPlugin().run(None, {"discover": {}}, current)
+    current = TargetCapabilities(tools=[ToolDefinition(name="existing_tool")])
+    result = DiscoverReconPlugin({"discover": {}}).run(None, current)
     assert result is None, "DiscoverReconPlugin should skip when tools are already known"

@@ -4,11 +4,8 @@
 """Tests for the Agent Breaker probe module"""
 
 import copy
-import json
 import logging
 import os
-import textwrap
-import yaml
 
 import pytest
 from unittest.mock import MagicMock, patch, call
@@ -68,162 +65,6 @@ def _make_probe(**overrides):
 
 
 # ===========================================================================
-# _load_agent_config  (YAML relaxation)
-# ===========================================================================
-
-
-class TestLoadAgentConfig:
-
-    @pytest.fixture
-    def agent_yaml_config(self, tmp_path, content):
-        agent_dir = tmp_path / "agent_breaker"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        cfg = agent_dir / "agent.yaml"
-        cfg.write_text(textwrap.dedent(content))
-        return tmp_path
-
-    test_configs = [
-        {
-            "agent_purpose": "A test bot",
-            "tools": [
-                {
-                    "name": "tools_a",
-                    "description": "Does A",
-                },
-            ],
-        },
-        {
-            "agent_purpose": "A test bot",
-        },
-        {},
-        {
-            "some_other_key": "value",
-        },
-    ]
-
-    @pytest.mark.parametrize(
-        "content, purpose, tools",
-        [
-            (
-                yaml.dump(test_config),
-                test_config.get("agent_purpose", ""),
-                test_config.get("tools", []),
-            )
-            for test_config in test_configs
-        ],
-    )
-    def test_yaml(self, content, purpose, tools, agent_yaml_config):
-        data_dir = agent_yaml_config
-        probe = _make_probe()
-        probe.agent_config_file = "agent_breaker/agent.yaml"
-        with patch("garak.probes.agent_breaker.data_path", data_dir):
-            probe._load_agent_config()
-        assert probe.agent_config["agent_purpose"] == purpose
-        assert len(probe.agent_config["tools"]) == len(tools)
-        if len(tools) > 0:
-            assert probe.agent_config["tools"][0]["name"] == tools[0]["name"]
-
-
-# ===========================================================================
-# _discover_agent_config
-# ===========================================================================
-
-
-class TestDiscoverAgentConfig:
-
-    def test_noop_when_tools_present(self):
-        """If tools are already set, generator should never be called."""
-        probe = _make_probe()
-        generator = MagicMock()
-        probe._discover_agent_config(generator)
-        generator.generate.assert_not_called()
-
-    def test_discovers_tools_only_when_purpose_set(self):
-        """If purpose exists but tools are empty, only ask for tools.
-        agent_purpose must NOT be overwritten."""
-        probe = _make_probe(
-            agent_config={
-                "agent_purpose": "My custom purpose",
-                "tools": [],
-            }
-        )
-        agent_resp = MagicMock()
-        agent_resp.text = "I have tool_x and tool_y"
-        generator = MagicMock()
-        generator.generate.return_value = [agent_resp]
-
-        rt_json = json.dumps(
-            {
-                "tools": [
-                    {"name": "tool_x", "description": "Does X"},
-                    {"name": "tool_y", "description": "Does Y"},
-                ]
-            }
-        )
-        probe._get_model_response = MagicMock(return_value=rt_json)
-
-        probe._discover_agent_config(generator)
-
-        assert probe.agent_config["agent_purpose"] == "My custom purpose"
-        assert len(probe.agent_config["tools"]) == 2
-        assert probe.agent_config["tools"][0]["name"] == "tool_x"
-
-    def test_discovers_both_when_nothing_set(self):
-        """If both purpose and tools are empty, discover both."""
-        probe = _make_probe(agent_config={"agent_purpose": "", "tools": []})
-        agent_resp = MagicMock()
-        agent_resp.text = "I am a helper with tool_a"
-        generator = MagicMock()
-        generator.generate.return_value = [agent_resp]
-
-        rt_json = json.dumps(
-            {
-                "agent_purpose": "A helpful assistant",
-                "tools": [{"name": "tool_a", "description": "Does A"}],
-            }
-        )
-        probe._get_model_response = MagicMock(return_value=rt_json)
-
-        probe._discover_agent_config(generator)
-
-        assert probe.agent_config["agent_purpose"] == "A helpful assistant"
-        assert len(probe.agent_config["tools"]) == 1
-
-    def test_agent_returns_empty_response(self):
-        """If agent returns None text, tools should stay empty."""
-        probe = _make_probe(agent_config={"agent_purpose": "", "tools": []})
-        agent_resp = MagicMock()
-        agent_resp.text = None
-        generator = MagicMock()
-        generator.generate.return_value = [agent_resp]
-
-        probe._discover_agent_config(generator)
-        assert probe.agent_config["tools"] == []
-
-    def test_generator_raises_exception(self):
-        """If generator.generate raises, config should be unchanged."""
-        probe = _make_probe(agent_config={"agent_purpose": "P", "tools": []})
-        generator = MagicMock()
-        generator.generate.side_effect = RuntimeError("connection failed")
-
-        probe._discover_agent_config(generator)
-        assert probe.agent_config["tools"] == []
-        assert probe.agent_config["agent_purpose"] == "P"
-
-    def test_red_team_returns_invalid_json(self):
-        """If red team returns garbage, config unchanged."""
-        probe = _make_probe(agent_config={"agent_purpose": "", "tools": []})
-        agent_resp = MagicMock()
-        agent_resp.text = "I have tools"
-        generator = MagicMock()
-        generator.generate.return_value = [agent_resp]
-        probe._get_model_response = MagicMock(return_value="NOT JSON {{{")
-
-        probe._discover_agent_config(generator)
-        assert probe.agent_config["tools"] == []
-
-
-# ===========================================================================
 # probe() orchestration
 # ===========================================================================
 
@@ -235,7 +76,6 @@ class TestProbeOrchestration:
         probe = _make_probe()
         with (
             patch.object(probe, "_setup_red_team_model"),
-            patch.object(probe, "_discover_agent_config") as mock_discover,
             patch.object(
                 probe,
                 "_analyze_attackable_tools",
@@ -246,15 +86,12 @@ class TestProbeOrchestration:
             ),
             patch.object(probe, "_attack_single_tool", return_value=[]),
         ):
+            # probe.agent_config already has tools from _make_probe; no discovery should occur
             probe._create_init_attempts()
-            mock_discover.assert_not_called()
 
     def test_returns_empty_when_no_tools(self):
         probe = _make_probe(agent_config={"agent_purpose": "", "tools": []})
-        with (
-            patch.object(probe, "_setup_red_team_model"),
-            patch.object(probe, "_discover_agent_config"),
-        ):
+        with patch.object(probe, "_setup_red_team_model"):
             result = list(probe._create_init_attempts())
         assert result == []
 
