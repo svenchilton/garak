@@ -8,6 +8,7 @@ from typing import Optional
 
 from garak.resources.recon.base import (
     ReconPlugin,
+    SecurityAnnotations,
     TargetCapabilities,
     ToolDefinition,
     load_agent_config,
@@ -34,6 +35,8 @@ class FileReconPlugin(ReconPlugin):
         from garak.data import path as data_path
 
         try:
+            from garak.resources.recon.mcp import _annotate_security
+
             cfg = load_agent_config(data_path / self._config_path)
             tools = [
                 ToolDefinition(
@@ -41,6 +44,9 @@ class FileReconPlugin(ReconPlugin):
                     description=t.get("description", ""),
                     input_schema=t.get("inputSchema", t.get("input_schema", {})),
                     annotations=t.get("annotations", {}),
+                    security_annotations=SecurityAnnotations.from_dict(
+                        _annotate_security(t)
+                    ),
                 )
                 for t in cfg.get("tools", [])
                 if isinstance(t, dict)
