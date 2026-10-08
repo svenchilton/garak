@@ -18,7 +18,6 @@ from typing import Callable, List, Optional
 import yaml
 
 import garak.attempt
-from garak.configurable import Configurable
 from garak.exception import GarakException
 
 
@@ -62,7 +61,7 @@ def load_agent_config(config_file_path: Path) -> dict:
     try:
         with open(config_file_path, "r", encoding="utf-8") as f:
             agent_config = yaml.safe_load(f)
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         msg = f"Failed to load agent config from {config_file_path}: {e}"
         logging.error(msg)
         raise GarakException(msg) from e
@@ -123,7 +122,7 @@ def discover_agent_config(
     )
     try:
         response = generator.generate(prompt=conv, generations_this_call=1)
-    except Exception as e:
+    except GarakException as e:
         logging.warning("recon # Discovery call failed: %s", e)
         return agent_config
 
@@ -283,7 +282,7 @@ class TargetCapabilities:
 # ---------------------------------------------------------------------------
 
 
-class ReconPlugin(Configurable):
+class ReconPlugin:
     """Base class for recon source plugins.
 
     Each subclass encapsulates one strategy for gathering capability

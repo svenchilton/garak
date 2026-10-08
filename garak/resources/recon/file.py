@@ -6,6 +6,7 @@
 import logging
 from typing import Optional
 
+from garak.exception import GarakException
 from garak.resources.recon.base import (
     ReconPlugin,
     SecurityAnnotations,
@@ -55,6 +56,6 @@ class FileReconPlugin(ReconPlugin):
                 purpose=cfg.get("agent_purpose", ""),
                 tools=tools,
             )
-        except Exception as exc:
+        except (GarakException, TypeError) as exc:
             logging.warning("recon FileReconPlugin: %s", exc)
             return None

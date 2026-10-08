@@ -139,6 +139,48 @@ def test_annotate_security_chain_policy_sink_only():
     assert annotations["chain_policy"]["allowed_successors"] == []
 
 
+def test_annotate_security_url_param_without_open_world_not_a_sink():
+    """network_egress via URL param alone does not make a tool a sink."""
+    tool = {
+        "description": "Fetch a resource by URL.",
+        "annotations": {},
+        "inputSchema": {"properties": {"url": {"type": "string", "format": "uri"}}},
+    }
+    annotations = _annotate_security(tool)
+    assert "network_egress" in annotations["capability_class"], \
+        "URL param triggers network_egress"
+    assert annotations["is_sink"] is False, \
+        "URL param without openWorldHint does not make a sink"
+
+
+def test_annotate_security_source_and_sink():
+    """A tool that reads secrets AND has openWorldHint is both source and sink."""
+    tool = {
+        "description": "Read credentials and post them to the server.",
+        "annotations": {"openWorldHint": True, "idempotentHint": False},
+        "inputSchema": {},
+    }
+    annotations = _annotate_security(tool)
+    assert annotations["is_source"] is True, "read_sensitive → is_source"
+    assert annotations["is_sink"] is True, "openWorldHint → is_sink"
+    assert annotations["chain_policy"]["max_depth"] == 3, \
+        "source branch takes precedence over sink-only branch"
+
+
+def test_annotate_security_benign_chain_policy():
+    """Benign tools get chain_policy with max_depth=3 and no allowed_successors."""
+    tool = {
+        "description": "Return the current UTC timestamp.",
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": {},
+    }
+    annotations = _annotate_security(tool)
+    assert annotations["chain_policy"]["max_depth"] == 3, \
+        "benign tool has unrestricted chain depth"
+    assert annotations["chain_policy"]["allowed_successors"] == [], \
+        "benign tool has no constrained successor list"
+
+
 # ---------------------------------------------------------------------------
 # build_tool_manifest
 # ---------------------------------------------------------------------------
@@ -320,6 +362,34 @@ def test_discover_returns_unchanged_on_empty_response():
     assert result["tools"] == []
 
 
+def test_discover_tools_only_path():
+    """When purpose is set but tools are empty, DISCOVERY_TOOLS_ONLY prompt is used."""
+    config = {"agent_purpose": "A helpful assistant", "tools": []}
+
+    mock_gen = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "I have tool_x"
+    mock_gen.generate.return_value = [mock_response]
+
+    prompts = {
+        "DISCOVERY_FULL": "What tools do you have?",
+        "DISCOVERY_TOOLS_ONLY": "List only your tools.",
+        "PARSE_FULL": "Parse this: {agent_response}",
+        "PARSE_TOOLS_ONLY": "Parse tools only: {agent_response}",
+    }
+    discovered = [{"name": "tool_x", "description": "Does X."}]
+    parse_fn = lambda _: {"tools": discovered}
+
+    result = discover_agent_config(mock_gen, config, prompts, parse_fn)
+
+    call_prompt = mock_gen.generate.call_args.kwargs.get("prompt") or mock_gen.generate.call_args.args[0]
+    assert call_prompt.turns[0].content.text == "List only your tools.", \
+        "tools-only path must use DISCOVERY_TOOLS_ONLY prompt"
+    assert result["tools"] == discovered, "tools should be updated"
+    assert result["agent_purpose"] == "A helpful assistant", \
+        "purpose should be unchanged in tools-only path"
+
+
 # ---------------------------------------------------------------------------
 # SecurityAnnotations dataclass
 # ---------------------------------------------------------------------------
@@ -401,6 +471,14 @@ def test_tool_definition_roundtrip():
     assert td2.name == td.name
     assert td2.input_schema == td.input_schema
     assert td2.security_annotations.capability_class == ["code_exec"]
+
+
+def test_tool_definition_from_dict_snake_case_fallback():
+    """from_dict accepts snake_case input_schema when inputSchema is absent."""
+    schema = {"properties": {"query": {"type": "string"}}}
+    raw = {"name": "search", "description": "Search the index.", "input_schema": schema}
+    td = ToolDefinition.from_dict(raw)
+    assert td.input_schema == schema, "snake_case input_schema should be used as fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +603,26 @@ def test_file_plugin_run_missing_file(tmp_path):
     assert result is None, "FileReconPlugin should return None on missing file"
 
 
+def test_file_plugin_run_security_annotations(tmp_path):
+    """Tools loaded from YAML get security annotations derived from their description."""
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text(
+        "agent_purpose: Shell agent\n"
+        "tools:\n"
+        "- name: run_command\n"
+        "  description: Execute a shell command\n"
+    )
+
+    with patch("garak.data.path", tmp_path):
+        plugin = FileReconPlugin({"agent_config_path": "agent.yaml"})
+        result = plugin.run(None, TargetCapabilities())
+
+    assert result is not None
+    sa = result.tools[0].security_annotations
+    assert "code_exec" in sa.capability_class, \
+        "'Execute a shell command' should trigger code_exec annotation"
+
+
 # ---------------------------------------------------------------------------
 # MCPReconPlugin.run
 # ---------------------------------------------------------------------------
@@ -558,6 +656,35 @@ def test_mcp_plugin_run_network_error():
     assert result is None, "MCPReconPlugin should return None on network error"
 
 
+def test_mcp_plugin_run_security_annotations():
+    """Tools returned by MCP carry security annotations derived from their description."""
+    tools_payload = [
+        {
+            "name": "read_secret",
+            "description": "Read the user's auth token from the vault.",
+            "inputSchema": {},
+            "annotations": {},
+        }
+    ]
+    mock_response_body = json.dumps(
+        {"jsonrpc": "2.0", "result": {"tools": tools_payload}, "id": 1}
+    ).encode()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = mock_response_body
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
+
+    assert result is not None
+    sa = result.tools[0].security_annotations
+    assert "read_sensitive" in sa.capability_class, \
+        "'auth token' keyword should trigger read_sensitive annotation"
+    assert sa.is_source is True, "read_sensitive tool is a data source"
+
+
 # ---------------------------------------------------------------------------
 # DiscoverReconPlugin.run — skips when tools already known
 # ---------------------------------------------------------------------------
@@ -567,3 +694,53 @@ def test_discover_plugin_skips_when_tools_present():
     current = TargetCapabilities(tools=[ToolDefinition(name="existing_tool")])
     result = DiscoverReconPlugin({"discover": {}}).run(None, current)
     assert result is None, "DiscoverReconPlugin should skip when tools are already known"
+
+
+def test_discover_plugin_run_success(tmp_path):
+    """DiscoverReconPlugin.run returns TargetCapabilities when discovery succeeds."""
+    prompts_dir = tmp_path / "agent_breaker"
+    prompts_dir.mkdir()
+    (prompts_dir / "prompts.yaml").write_text(
+        "DISCOVERY_FULL: 'What tools do you have?'\n"
+        "DISCOVERY_TOOLS_ONLY: 'List only your tools.'\n"
+        "PARSE_FULL: 'Parse this: {agent_response}'\n"
+        "PARSE_TOOLS_ONLY: 'Parse tools only: {agent_response}'\n"
+        "VERIFY: 'stub'\n"
+    )
+
+    discovered_tools = [{"name": "fetch_data", "description": "Fetches external data."}]
+    discovery_resp = MagicMock()
+    discovery_resp.text = "I can fetch data."
+    parse_resp = MagicMock()
+    parse_resp.text = json.dumps(
+        {"agent_purpose": "Data fetching agent", "tools": discovered_tools}
+    )
+
+    target = MagicMock()
+    target.generate.side_effect = [[discovery_resp], [parse_resp]]
+
+    plugin = DiscoverReconPlugin({"discover": {}})
+
+    with (
+        patch("garak.data.path", tmp_path),
+        patch.object(plugin, "_load_parse_generator", return_value=None),
+    ):
+        result = plugin.run(target, TargetCapabilities())
+
+    assert result is not None, "DiscoverReconPlugin should return TargetCapabilities on success"
+    assert result.has_tools(), "result should contain discovered tools"
+    assert result.tools[0].name == "fetch_data"
+    assert result.purpose == "Data fetching agent"
+
+
+def test_discover_plugin_run_returns_none_on_missing_prompts_file(tmp_path):
+    """DiscoverReconPlugin.run returns None when the prompts file is missing."""
+    plugin = DiscoverReconPlugin({"discover": {}})
+
+    with (
+        patch("garak.data.path", tmp_path),
+        patch.object(plugin, "_load_parse_generator", return_value=None),
+    ):
+        result = plugin.run(MagicMock(), TargetCapabilities())
+
+    assert result is None, "missing prompts file should cause run() to return None"

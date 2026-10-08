@@ -285,6 +285,6 @@ class MCPReconPlugin(ReconPlugin):
             )
             tools = [ToolDefinition.from_dict(t) for t in tool_manifest["tools"]]
             return TargetCapabilities(tools=tools, tool_manifest=tool_manifest)
-        except Exception as exc:
+        except (GarakException, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as exc:
             logging.warning("recon MCPReconPlugin: %s", exc)
             return None
