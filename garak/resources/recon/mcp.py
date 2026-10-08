@@ -54,12 +54,12 @@ class MutateKeyword(str, Enum):
 
 
 class ExecKeyword(str, Enum):
-    EXECUTE = "execute"
-    RUN = "run"
     EVAL = "eval"
     SHELL = "shell"
     SUBPROCESS = "subprocess"
     COMMAND = "command"
+    SCRIPT = "script"
+    BASH = "bash"
 
 
 class AuthKeyword(str, Enum):
