@@ -260,17 +260,18 @@ def mcp_enumerate(
 class MCPReconPlugin(ReconPlugin):
     """Enumerate tools from an MCP server via a tools/list JSON-RPC call."""
 
+    DEFAULT_PARAMS = {
+        "server_url": None,
+        "transport": "streamable-http",
+        "timeout": 30.0,
+    }
     priority = 20
 
-    def __init__(self, recon_cfg: dict = None):
-        super().__init__(recon_cfg)
-        mcp = self._recon_cfg.get("mcp", {})
-        self._server_url: Optional[str] = mcp.get("server_url")
-        self._transport: str = mcp.get("transport", "streamable-http")
-        self._timeout: float = float(mcp.get("timeout", 30.0))
+    def __init__(self, config_root=None):
+        super().__init__(config_root)
 
     def applicable(self) -> bool:
-        return bool(self._server_url)
+        return bool(self.server_url)
 
     def run(
         self,
@@ -278,9 +279,9 @@ class MCPReconPlugin(ReconPlugin):
         current: TargetCapabilities,
     ) -> Optional[TargetCapabilities]:
         try:
-            raw_tools = mcp_enumerate(self._server_url, self._transport, self._timeout)
+            raw_tools = mcp_enumerate(self.server_url, self.transport, float(self.timeout))
             tool_manifest = build_tool_manifest(
-                {"endpoint": self._server_url, "transport": self._transport},
+                {"endpoint": self.server_url, "transport": self.transport},
                 raw_tools,
             )
             tools = [ToolDefinition.from_dict(t) for t in tool_manifest["tools"]]

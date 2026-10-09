@@ -19,14 +19,16 @@ from garak.resources.recon.base import (
 class FileReconPlugin(ReconPlugin):
     """Load target purpose and tools from a static YAML configuration file."""
 
+    DEFAULT_PARAMS = {
+        "agent_config_path": None,
+    }
     priority = 10
 
-    def __init__(self, recon_cfg: dict = None):
-        super().__init__(recon_cfg)
-        self._config_path: Optional[str] = self._recon_cfg.get("agent_config_path")
+    def __init__(self, config_root=None):
+        super().__init__(config_root)
 
     def applicable(self) -> bool:
-        return bool(self._config_path)
+        return bool(self.agent_config_path)
 
     def run(
         self,
@@ -38,7 +40,7 @@ class FileReconPlugin(ReconPlugin):
         try:
             from garak.resources.recon.mcp import _annotate_security
 
-            cfg = load_agent_config(data_path / self._config_path)
+            cfg = load_agent_config(data_path / self.agent_config_path)
             tools = [
                 ToolDefinition(
                     name=t.get("name", ""),

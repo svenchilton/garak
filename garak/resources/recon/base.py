@@ -18,6 +18,7 @@ from typing import Callable, List, Optional
 import yaml
 
 import garak.attempt
+from garak.configurable import Configurable
 from garak.exception import GarakException
 
 
@@ -282,7 +283,7 @@ class TargetCapabilities:
 # ---------------------------------------------------------------------------
 
 
-class ReconPlugin:
+class ReconPlugin(Configurable):
     """Base class for recon source plugins.
 
     Each subclass encapsulates one strategy for gathering capability
@@ -290,18 +291,23 @@ class ReconPlugin:
     runtime by inspecting this package; adding a new plugin requires only a
     new module file.
 
-    Plugins are instantiated with the full ``recon`` config dict.  Whether a
-    plugin has the configuration it needs to operate is reported by
+    Plugins are instantiated with a garak ``config_root`` dict.  Subclasses
+    declare their configuration keys and defaults in ``DEFAULT_PARAMS``; garak's
+    :class:`~garak.configurable.Configurable` machinery applies matching entries
+    from the config root to instance attributes at construction time.
+
+    Whether a plugin has the configuration it needs to operate is reported by
     :meth:`applicable`; the harness skips plugins that return ``False``.
     Results from the plugins that do run are merged into a single
     :class:`TargetCapabilities` object.
     """
 
+    DEFAULT_PARAMS: dict = {}
     active = True
     priority: int = 50
 
-    def __init__(self, recon_cfg: dict = None):
-        self._recon_cfg = recon_cfg or {}
+    def __init__(self, config_root=None):
+        self._load_config(config_root)
 
     def applicable(self) -> bool:
         """Return True if this plugin has the configuration it needs to run."""

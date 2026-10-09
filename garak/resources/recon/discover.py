@@ -6,7 +6,10 @@
 import logging
 from typing import Optional
 
+import yaml
+
 import garak.attempt
+from garak.exception import GarakException
 from garak.resources.recon.base import (
     ReconPlugin,
     TargetCapabilities,
@@ -22,16 +25,27 @@ class DiscoverReconPlugin(ReconPlugin):
     Skipped automatically when the accumulated :class:`TargetCapabilities`
     already contains tools, to avoid unnecessary (and potentially slow)
     model calls.
+
+    Set ``parse_model_type`` to use a dedicated parsing model, or leave it
+    unset to use the target agent itself for parsing.  The plugin is
+    :meth:`applicable` only when ``parse_model_type`` is configured or
+    ``discover_enabled`` is explicitly ``True``.
     """
 
+    DEFAULT_PARAMS = {
+        "discover_enabled": False,
+        "prompts_path": "agent_breaker/prompts.yaml",
+        "parse_model_type": None,
+        "parse_model_name": None,
+        "parse_model_config": None,
+    }
     priority = 30
 
-    def __init__(self, recon_cfg: dict = None):
-        super().__init__(recon_cfg)
-        self._discover_cfg: Optional[dict] = self._recon_cfg.get("discover")
+    def __init__(self, config_root=None):
+        super().__init__(config_root)
 
     def applicable(self) -> bool:
-        return bool(self._discover_cfg)
+        return bool(self.parse_model_type) or bool(self.discover_enabled)
 
     def run(
         self,
@@ -43,15 +57,12 @@ class DiscoverReconPlugin(ReconPlugin):
             return None
 
         from garak.data import path as data_path
-        import yaml
 
-        prompts_path = data_path / self._discover_cfg.get(
-            "prompts_path", "agent_breaker/prompts.yaml"
-        )
+        prompts_path = data_path / self.prompts_path
         try:
             with open(prompts_path, "r", encoding="utf-8") as fh:
                 prompts = yaml.safe_load(fh)
-        except Exception as exc:
+        except (OSError, yaml.YAMLError) as exc:
             logging.warning(
                 "recon DiscoverReconPlugin: failed to load prompts: %s", exc
             )
@@ -71,7 +82,7 @@ class DiscoverReconPlugin(ReconPlugin):
             )
             try:
                 resp = gen.generate(prompt=conv, generations_this_call=1)
-            except Exception as exc:
+            except GarakException as exc:
                 logging.warning(
                     "recon DiscoverReconPlugin: parse call failed: %s", exc
                 )
@@ -83,7 +94,7 @@ class DiscoverReconPlugin(ReconPlugin):
         current_dict = {"agent_purpose": current.purpose, "tools": []}
         try:
             updated = discover_agent_config(target, current_dict, prompts, _parse_fn)
-        except Exception as exc:
+        except GarakException as exc:
             logging.warning("recon DiscoverReconPlugin: discovery failed: %s", exc)
             return None
 
@@ -110,24 +121,22 @@ class DiscoverReconPlugin(ReconPlugin):
         import copy
         from garak import _plugins
 
-        parse_model_type = self._discover_cfg.get("parse_model_type")
-        if not parse_model_type:
+        if not self.parse_model_type:
             return None
-        parse_model_name = self._discover_cfg.get("parse_model_name")
-        parse_model_config = self._discover_cfg.get("parse_model_config") or {}
+        parse_model_config = self.parse_model_config or {}
         try:
             generator_root: dict = {"generators": {}}
             conf_root = generator_root["generators"]
-            for part in parse_model_type.split("."):
+            for part in self.parse_model_type.split("."):
                 conf_root = conf_root.setdefault(part, {})
             conf_root.update(copy.deepcopy(parse_model_config))
-            if parse_model_name:
-                conf_root["name"] = parse_model_name
+            if self.parse_model_name:
+                conf_root["name"] = self.parse_model_name
             return _plugins.load_plugin(
-                f"generators.{parse_model_type}",
+                f"generators.{self.parse_model_type}",
                 config_root=generator_root,
             )
-        except Exception as exc:
+        except (GarakException, ImportError, TypeError, AttributeError) as exc:
             logging.warning(
                 "recon DiscoverReconPlugin: failed to load parse generator: %s", exc
             )

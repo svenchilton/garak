@@ -551,31 +551,34 @@ def test_target_capabilities_merge_tool_manifest():
 
 
 def test_file_plugin_applicable_with_path():
-    assert FileReconPlugin({"agent_config_path": "some/path.yaml"}).applicable()
+    cfg = {"recon": {"file": {"agent_config_path": "some/path.yaml"}}}
+    assert FileReconPlugin(cfg).applicable()
 
 
 def test_file_plugin_not_applicable_without_path():
-    assert not FileReconPlugin({}).applicable()
+    assert not FileReconPlugin(None).applicable()
 
 
 def test_mcp_plugin_applicable_with_server_url():
-    assert MCPReconPlugin({"mcp": {"server_url": "http://agent:8080/mcp"}}).applicable()
+    cfg = {"recon": {"mcp": {"server_url": "http://agent:8080/mcp"}}}
+    assert MCPReconPlugin(cfg).applicable()
 
 
 def test_mcp_plugin_not_applicable_without_mcp():
-    assert not MCPReconPlugin({}).applicable()
+    assert not MCPReconPlugin(None).applicable()
 
 
 def test_mcp_plugin_not_applicable_without_server_url():
-    assert not MCPReconPlugin({"mcp": {}}).applicable()
+    assert not MCPReconPlugin({"recon": {"mcp": {}}}).applicable()
 
 
 def test_discover_plugin_applicable():
-    assert DiscoverReconPlugin({"discover": {"parse_model_type": "nim"}}).applicable()
+    cfg = {"recon": {"discover": {"parse_model_type": "nim"}}}
+    assert DiscoverReconPlugin(cfg).applicable()
 
 
 def test_discover_plugin_not_applicable():
-    assert not DiscoverReconPlugin({}).applicable()
+    assert not DiscoverReconPlugin(None).applicable()
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +591,7 @@ def test_file_plugin_run_success(tmp_path):
     cfg.write_text("agent_purpose: My bot\ntools:\n- name: fetch\n  description: Get data\n")
 
     with patch("garak.data.path", tmp_path):
-        plugin = FileReconPlugin({"agent_config_path": "agent.yaml"})
+        plugin = FileReconPlugin({"recon": {"file": {"agent_config_path": "agent.yaml"}}})
         result = plugin.run(None, TargetCapabilities())
 
     assert result is not None, "FileReconPlugin should return TargetCapabilities on success"
@@ -598,7 +601,7 @@ def test_file_plugin_run_success(tmp_path):
 
 def test_file_plugin_run_missing_file(tmp_path):
     with patch("garak.data.path", tmp_path):
-        plugin = FileReconPlugin({"agent_config_path": "nonexistent.yaml"})
+        plugin = FileReconPlugin({"recon": {"file": {"agent_config_path": "nonexistent.yaml"}}})
         result = plugin.run(None, TargetCapabilities())
     assert result is None, "FileReconPlugin should return None on missing file"
 
@@ -614,7 +617,7 @@ def test_file_plugin_run_security_annotations(tmp_path):
     )
 
     with patch("garak.data.path", tmp_path):
-        plugin = FileReconPlugin({"agent_config_path": "agent.yaml"})
+        plugin = FileReconPlugin({"recon": {"file": {"agent_config_path": "agent.yaml"}}})
         result = plugin.run(None, TargetCapabilities())
 
     assert result is not None
@@ -638,9 +641,9 @@ def test_mcp_plugin_run_success():
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
 
-    recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
+    cfg = {"recon": {"mcp": {"server_url": "http://agent:8080/mcp"}}}
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
+        result = MCPReconPlugin(cfg).run(None, TargetCapabilities())
 
     assert result is not None, "MCPReconPlugin should return TargetCapabilities on success"
     assert result.has_tools(), "MCPReconPlugin result should have tools"
@@ -650,9 +653,9 @@ def test_mcp_plugin_run_success():
 
 def test_mcp_plugin_run_network_error():
     import urllib.error
-    recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
+    cfg = {"recon": {"mcp": {"server_url": "http://agent:8080/mcp"}}}
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
-        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
+        result = MCPReconPlugin(cfg).run(None, TargetCapabilities())
     assert result is None, "MCPReconPlugin should return None on network error"
 
 
@@ -674,9 +677,9 @@ def test_mcp_plugin_run_security_annotations():
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
 
-    recon_cfg = {"mcp": {"server_url": "http://agent:8080/mcp"}}
+    cfg = {"recon": {"mcp": {"server_url": "http://agent:8080/mcp"}}}
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = MCPReconPlugin(recon_cfg).run(None, TargetCapabilities())
+        result = MCPReconPlugin(cfg).run(None, TargetCapabilities())
 
     assert result is not None
     sa = result.tools[0].security_annotations
@@ -692,7 +695,7 @@ def test_mcp_plugin_run_security_annotations():
 
 def test_discover_plugin_skips_when_tools_present():
     current = TargetCapabilities(tools=[ToolDefinition(name="existing_tool")])
-    result = DiscoverReconPlugin({"discover": {}}).run(None, current)
+    result = DiscoverReconPlugin(None).run(None, current)
     assert result is None, "DiscoverReconPlugin should skip when tools are already known"
 
 
@@ -719,7 +722,7 @@ def test_discover_plugin_run_success(tmp_path):
     target = MagicMock()
     target.generate.side_effect = [[discovery_resp], [parse_resp]]
 
-    plugin = DiscoverReconPlugin({"discover": {}})
+    plugin = DiscoverReconPlugin(None)
 
     with (
         patch("garak.data.path", tmp_path),
@@ -735,7 +738,7 @@ def test_discover_plugin_run_success(tmp_path):
 
 def test_discover_plugin_run_returns_none_on_missing_prompts_file(tmp_path):
     """DiscoverReconPlugin.run returns None when the prompts file is missing."""
-    plugin = DiscoverReconPlugin({"discover": {}})
+    plugin = DiscoverReconPlugin(None)
 
     with (
         patch("garak.data.path", tmp_path),
