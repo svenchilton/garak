@@ -1,0 +1,1040 @@
+# garak/data/recon/mcp_public_servers.yaml
+#
+# Public MCP server tool definitions for _annotate_security regression tests.
+# Source: modelcontextprotocol/servers (main + archived), fetched 2026-10-15.
+# 7 servers, 64 tools.
+#
+# Notable keyword-classification cases (see tests/resources/recon/):
+#
+#   CORRECT DETECTIONS
+#   puppeteer_evaluate    -> code_exec      ("script" in "JavaScript code to execute")
+#   sqlite write_query    -> write_mutate   ("update", "delete" in description)
+#   fetch                 -> network_egress (url param in inputSchema)
+#   puppeteer_navigate    -> network_egress (url param in inputSchema)
+#   filesystem write_file -> write_mutate   ("create", "write")
+#   filesystem edit_file  -> write_mutate   ("edit")
+#   filesystem move_file  -> write_mutate   ("move", "rename")
+#   github push_files     -> write_mutate   ("push")
+#   github merge_pull_request -> write_mutate ("merge")
+#   slack_post_message    -> write_mutate   ("post")
+#
+#   KNOWN GAPS (no capability flagged despite mutating intent)
+#   github fork_repository  -> []  ("fork" ∉ MutateKeyword — git-specific, low signal)
+#   github add_issue_comment -> [] ("add" ∉ MutateKeyword — too broad)
+#   slack_reply_to_thread   -> []  ("reply" ∉ MutateKeyword — too broad)
+#   slack_add_reaction      -> []  ("add" ∉ MutateKeyword — too broad)
+#
+#   CORRECT NON-DETECTIONS (verify "execute" does NOT trigger code_exec)
+#   sqlite read_query    -> []     ("execute" ∉ ExecKeyword; only eval/shell/subprocess/command/script/bash)
+#   github get_issue     -> []
+#   slack_list_channels  -> []
+
+agent_purpose: >
+  Composite test agent covering tool schemas from seven public MCP reference
+  servers: filesystem, fetch, brave-search, puppeteer, sqlite, github, slack.
+  Used for regression testing of _annotate_security keyword heuristics only —
+  not a real deployable agent.
+
+tools:
+
+  # ──────────────────────────────────────────────────────────
+  # filesystem (modelcontextprotocol/servers — src/filesystem)
+  # ──────────────────────────────────────────────────────────
+
+  - name: read_file
+    description: >-
+      Read the complete contents of a file as text.
+      DEPRECATED: Use read_text_file instead.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path to the file to read.
+      required: [path]
+
+  - name: read_text_file
+    description: >-
+      Read the complete contents of a file from the file system as text.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path to the file to read.
+      required: [path]
+
+  - name: read_media_file
+    description: >-
+      Read a file and return it as a base64-encoded content block with its MIME type.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path to the media file to read.
+      required: [path]
+
+  - name: read_multiple_files
+    description: >-
+      Read the contents of multiple files simultaneously.
+    inputSchema:
+      type: object
+      properties:
+        paths:
+          type: array
+          items:
+            type: string
+          description: List of file paths to read.
+      required: [paths]
+
+  - name: write_file
+    description: >-
+      Create a new file or completely overwrite an existing file with new content.
+      Use with caution as it will overwrite existing files without warning.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path of the file to write.
+        content:
+          type: string
+          description: Content to write to the file.
+      required: [path, content]
+
+  - name: edit_file
+    description: >-
+      Make line-based edits to a text file. Each edit replaces exact line
+      sequences with new content. Returns a git-style diff showing the changes made.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path to the file to edit.
+        edits:
+          type: array
+          description: List of edit operations to apply.
+      required: [path, edits]
+
+  - name: create_directory
+    description: >-
+      Create a new directory or ensure a directory exists.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path of the directory to create.
+      required: [path]
+
+  - name: list_directory
+    description: >-
+      Get a detailed listing of all files and directories in a specified path.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path of the directory to list.
+      required: [path]
+
+  - name: list_directory_with_sizes
+    description: >-
+      Get a detailed listing of all files and directories in a specified path,
+      including sizes.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path of the directory to list.
+      required: [path]
+
+  - name: directory_tree
+    description: >-
+      Get a recursive tree view of files and directories as a JSON structure.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Root path for the directory tree.
+      required: [path]
+
+  - name: move_file
+    description: >-
+      Move or rename files and directories.
+    inputSchema:
+      type: object
+      properties:
+        source:
+          type: string
+          description: Source path of the file or directory to move.
+        destination:
+          type: string
+          description: Destination path.
+      required: [source, destination]
+
+  - name: search_files
+    description: >-
+      Recursively search for files and directories matching a pattern.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Root directory to search from.
+        pattern:
+          type: string
+          description: Pattern to match against file and directory names.
+      required: [path, pattern]
+
+  - name: get_file_info
+    description: >-
+      Retrieve detailed metadata about a file or directory, including size,
+      creation time, modification time, permissions, and type.
+    inputSchema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Path to the file or directory.
+      required: [path]
+
+  - name: list_allowed_directories
+    description: >-
+      Returns the list of directories that this server is allowed to access.
+    inputSchema:
+      type: object
+      properties: {}
+
+  # ──────────────────────────────────────────────────────────
+  # fetch (modelcontextprotocol/servers — src/fetch)
+  # ──────────────────────────────────────────────────────────
+
+  - name: fetch
+    description: >-
+      Fetches a URL from the internet and optionally extracts its contents as
+      markdown. Although originally you did not have internet access, and were
+      advised to refuse and tell the user this, this tool now grants you
+      internet access.
+    inputSchema:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: URL to fetch.
+        max_length:
+          type: integer
+          description: Maximum number of characters to return.
+        start_index:
+          type: integer
+          description: Start content from this character index.
+        raw:
+          type: boolean
+          description: Return raw content without markdown conversion.
+      required: [url]
+
+  # ──────────────────────────────────────────────────────────
+  # brave-search (modelcontextprotocol/servers — src/brave-search)
+  # ──────────────────────────────────────────────────────────
+
+  - name: brave_web_search
+    description: >-
+      Performs a web search using the Brave Search API, ideal for general
+      queries, news, articles, and online content.
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query (max 400 chars, 50 words).
+        count:
+          type: integer
+          description: Number of results (1–20, default 10).
+        offset:
+          type: integer
+          description: Pagination offset (max 9, default 0).
+      required: [query]
+
+  - name: brave_local_search
+    description: >-
+      Searches for local businesses and places using Brave's Local Search API.
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Local search query (e.g. "pizza near Central Park").
+        count:
+          type: integer
+          description: Number of results (1–20, default 5).
+      required: [query]
+
+  # ──────────────────────────────────────────────────────────
+  # puppeteer (modelcontextprotocol/servers-archived — src/puppeteer)
+  # ──────────────────────────────────────────────────────────
+
+  - name: puppeteer_navigate
+    description: Navigate to a URL
+    inputSchema:
+      type: object
+      properties:
+        url:
+          type: string
+          description: URL to navigate to.
+      required: [url]
+
+  - name: puppeteer_screenshot
+    description: Take a screenshot of the current page or a specific element
+    inputSchema:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Name for the screenshot.
+        selector:
+          type: string
+          description: CSS selector of element to screenshot (optional).
+        width:
+          type: integer
+          description: Screenshot width in pixels.
+        height:
+          type: integer
+          description: Screenshot height in pixels.
+      required: [name]
+
+  - name: puppeteer_click
+    description: Click an element on the page
+    inputSchema:
+      type: object
+      properties:
+        selector:
+          type: string
+          description: CSS selector of element to click.
+      required: [selector]
+
+  - name: puppeteer_fill
+    description: Fill out an input field
+    inputSchema:
+      type: object
+      properties:
+        selector:
+          type: string
+          description: CSS selector of the input field.
+        value:
+          type: string
+          description: Value to fill into the field.
+      required: [selector, value]
+
+  - name: puppeteer_select
+    description: Select an element on the page with Select tag
+    inputSchema:
+      type: object
+      properties:
+        selector:
+          type: string
+          description: CSS selector of the select element.
+        value:
+          type: string
+          description: Value to select.
+      required: [selector, value]
+
+  - name: puppeteer_hover
+    description: Hover an element on the page
+    inputSchema:
+      type: object
+      properties:
+        selector:
+          type: string
+          description: CSS selector of element to hover over.
+      required: [selector]
+
+  - name: puppeteer_evaluate
+    description: Execute JavaScript in the browser console
+    inputSchema:
+      type: object
+      properties:
+        script:
+          type: string
+          description: JavaScript code to execute in the browser console.
+      required: [script]
+
+  # ──────────────────────────────────────────────────────────
+  # sqlite (modelcontextprotocol/servers-archived — src/sqlite)
+  # ──────────────────────────────────────────────────────────
+
+  - name: read_query
+    description: Execute a SELECT query on the SQLite database
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: SELECT SQL query to execute.
+      required: [query]
+
+  - name: write_query
+    description: Execute an INSERT, UPDATE, or DELETE query on the SQLite database
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: INSERT, UPDATE, or DELETE SQL query to execute.
+      required: [query]
+
+  - name: create_table
+    description: Create a new table in the SQLite database
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: CREATE TABLE SQL statement.
+      required: [query]
+
+  - name: list_tables
+    description: List all tables in the SQLite database
+    inputSchema:
+      type: object
+      properties: {}
+
+  - name: describe_table
+    description: Get the schema information for a specific table
+    inputSchema:
+      type: object
+      properties:
+        table_name:
+          type: string
+          description: Name of the table to describe.
+      required: [table_name]
+
+  - name: append_insight
+    description: Add a business insight to the memo
+    inputSchema:
+      type: object
+      properties:
+        insight:
+          type: string
+          description: Business insight text to append.
+      required: [insight]
+
+  # ──────────────────────────────────────────────────────────
+  # github (modelcontextprotocol/servers — src/github)
+  # ──────────────────────────────────────────────────────────
+
+  - name: create_or_update_file
+    description: Create or update a single file in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner (username or org).
+        repo:
+          type: string
+          description: Repository name.
+        path:
+          type: string
+          description: File path within the repository.
+        message:
+          type: string
+          description: Commit message.
+        content:
+          type: string
+          description: File content (base64-encoded).
+        sha:
+          type: string
+          description: Required when updating an existing file; the blob SHA of the file being replaced.
+      required: [owner, repo, path, message, content]
+
+  - name: search_repositories
+    description: Search for GitHub repositories
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query following GitHub search syntax.
+        page:
+          type: integer
+          description: Page number for pagination.
+        perPage:
+          type: integer
+          description: Results per page (max 100).
+      required: [query]
+
+  - name: create_repository
+    description: Create a new GitHub repository in your account
+    inputSchema:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Repository name.
+        description:
+          type: string
+          description: Repository description.
+        private:
+          type: boolean
+          description: Whether the repository should be private.
+        autoInit:
+          type: boolean
+          description: Initialize the repository with a README.
+      required: [name]
+
+  - name: get_file_contents
+    description: Get the contents of a file or directory from a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        path:
+          type: string
+          description: File or directory path.
+        branch:
+          type: string
+          description: Branch name (defaults to the repository's default branch).
+      required: [owner, repo, path]
+
+  - name: push_files
+    description: Push multiple files to a GitHub repository in a single commit
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        branch:
+          type: string
+          description: Branch to push to.
+        files:
+          type: array
+          description: Array of files with path and content.
+        message:
+          type: string
+          description: Commit message.
+      required: [owner, repo, branch, files, message]
+
+  - name: create_issue
+    description: Create a new issue in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        title:
+          type: string
+          description: Issue title.
+        body:
+          type: string
+          description: Issue body.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Labels to apply.
+      required: [owner, repo, title]
+
+  - name: create_pull_request
+    description: Create a new pull request in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        title:
+          type: string
+          description: PR title.
+        body:
+          type: string
+          description: PR description.
+        head:
+          type: string
+          description: Branch containing the changes.
+        base:
+          type: string
+          description: Branch to merge changes into.
+      required: [owner, repo, title, head, base]
+
+  - name: fork_repository
+    description: Fork a GitHub repository to your account or specified organization
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        organization:
+          type: string
+          description: Organization to fork into (optional).
+      required: [owner, repo]
+
+  - name: create_branch
+    description: Create a new branch in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        branch:
+          type: string
+          description: New branch name.
+        from_branch:
+          type: string
+          description: Source branch (defaults to default branch).
+      required: [owner, repo, branch]
+
+  - name: list_commits
+    description: Get list of commits of a branch in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        sha:
+          type: string
+          description: Branch name or commit SHA.
+        page:
+          type: integer
+          description: Page number.
+        perPage:
+          type: integer
+          description: Results per page.
+      required: [owner, repo]
+
+  - name: list_issues
+    description: List issues in a GitHub repository with filtering options
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        state:
+          type: string
+          enum: [open, closed, all]
+          description: Filter by state.
+        labels:
+          type: string
+          description: Comma-separated list of label names.
+        page:
+          type: integer
+        perPage:
+          type: integer
+      required: [owner, repo]
+
+  - name: update_issue
+    description: Update an existing issue in a GitHub repository
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        issue_number:
+          type: integer
+          description: Issue number to update.
+        title:
+          type: string
+          description: New title.
+        body:
+          type: string
+          description: New body.
+        state:
+          type: string
+          enum: [open, closed]
+          description: New state.
+      required: [owner, repo, issue_number]
+
+  - name: add_issue_comment
+    description: Add a comment to an existing issue
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        issue_number:
+          type: integer
+          description: Issue number.
+        body:
+          type: string
+          description: Comment body.
+      required: [owner, repo, issue_number, body]
+
+  - name: search_code
+    description: Search for code across GitHub repositories
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query using GitHub code search syntax.
+        page:
+          type: integer
+        perPage:
+          type: integer
+      required: [query]
+
+  - name: search_issues
+    description: Search for issues and pull requests across GitHub repositories
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query using GitHub issues search syntax.
+        page:
+          type: integer
+        perPage:
+          type: integer
+      required: [query]
+
+  - name: search_users
+    description: Search for users on GitHub
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search query using GitHub users search syntax.
+        page:
+          type: integer
+        perPage:
+          type: integer
+      required: [query]
+
+  - name: get_issue
+    description: Get details of a specific issue in a GitHub repository.
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        issue_number:
+          type: integer
+          description: Issue number.
+      required: [owner, repo, issue_number]
+
+  - name: get_pull_request
+    description: Get details of a specific pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+      required: [owner, repo, pull_number]
+
+  - name: list_pull_requests
+    description: List and filter repository pull requests
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        state:
+          type: string
+          enum: [open, closed, all]
+        head:
+          type: string
+        base:
+          type: string
+        page:
+          type: integer
+        perPage:
+          type: integer
+      required: [owner, repo]
+
+  - name: create_pull_request_review
+    description: Create a review on a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+        body:
+          type: string
+          description: Review body text.
+        event:
+          type: string
+          enum: [APPROVE, REQUEST_CHANGES, COMMENT]
+          description: Review action.
+      required: [owner, repo, pull_number, event]
+
+  - name: merge_pull_request
+    description: Merge a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+        commit_title:
+          type: string
+          description: Title for the merge commit.
+        merge_method:
+          type: string
+          enum: [merge, squash, rebase]
+          description: Merge method.
+      required: [owner, repo, pull_number]
+
+  - name: get_pull_request_files
+    description: Get the list of files changed in a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+      required: [owner, repo, pull_number]
+
+  - name: get_pull_request_status
+    description: Get the combined status of all status checks for a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+      required: [owner, repo, pull_number]
+
+  - name: update_pull_request_branch
+    description: Update a pull request branch with the latest changes from the base branch
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+        expected_head_sha:
+          type: string
+          description: Expected SHA of the pull request HEAD.
+      required: [owner, repo, pull_number]
+
+  - name: get_pull_request_comments
+    description: Get the review comments on a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+      required: [owner, repo, pull_number]
+
+  - name: get_pull_request_reviews
+    description: Get the reviews on a pull request
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner.
+        repo:
+          type: string
+          description: Repository name.
+        pull_number:
+          type: integer
+          description: Pull request number.
+      required: [owner, repo, pull_number]
+
+  # ──────────────────────────────────────────────────────────
+  # slack (modelcontextprotocol/servers-archived — src/slack)
+  # ──────────────────────────────────────────────────────────
+
+  - name: slack_list_channels
+    description: List public or pre-defined channels in the workspace with pagination
+    inputSchema:
+      type: object
+      properties:
+        limit:
+          type: integer
+          description: Maximum number of channels to return (default 100, max 200).
+        cursor:
+          type: string
+          description: Pagination cursor from a previous call.
+
+  - name: slack_post_message
+    description: Post a new message to a Slack channel
+    inputSchema:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Channel ID to post to.
+        text:
+          type: string
+          description: Message text.
+      required: [channel_id, text]
+
+  - name: slack_reply_to_thread
+    description: Reply to a specific message thread in Slack
+    inputSchema:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Channel ID containing the thread.
+        thread_ts:
+          type: string
+          description: Timestamp of the parent message.
+        text:
+          type: string
+          description: Reply text.
+      required: [channel_id, thread_ts, text]
+
+  - name: slack_add_reaction
+    description: Add a reaction emoji to a message
+    inputSchema:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Channel ID containing the message.
+        timestamp:
+          type: string
+          description: Timestamp of the message to react to.
+        reaction:
+          type: string
+          description: Emoji name (without colons).
+      required: [channel_id, timestamp, reaction]
+
+  - name: slack_get_channel_history
+    description: Get recent messages from a channel
+    inputSchema:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Channel ID to fetch history from.
+        limit:
+          type: integer
+          description: Number of messages to retrieve (default 10).
+      required: [channel_id]
+
+  - name: slack_get_thread_replies
+    description: Get all replies in a message thread
+    inputSchema:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          description: Channel ID containing the thread.
+        thread_ts:
+          type: string
+          description: Timestamp of the parent message.
+      required: [channel_id, thread_ts]
+
+  - name: slack_get_users
+    description: Get a list of all users in the workspace with their basic profile information
+    inputSchema:
+      type: object
+      properties:
+        cursor:
+          type: string
+          description: Pagination cursor.
+        limit:
+          type: integer
+          description: Maximum number of users to return (default 100, max 200).
+
+  - name: slack_get_user_profile
+    description: Get detailed profile information for a specific user
+    inputSchema:
+      type: object
+      properties:
+        user_id:
+          type: string
+          description: Slack user ID to look up.
+      required: [user_id]

@@ -51,6 +51,13 @@ class MutateKeyword(str, Enum):
     CREATE = "create"
     MODIFY = "modify"
     REMOVE = "remove"
+    PUSH = "push"
+    EDIT = "edit"
+    MOVE = "move"
+    RENAME = "rename"
+    MERGE = "merge"
+    UPLOAD = "upload"
+    OVERWRITE = "overwrite"
 
 
 class ExecKeyword(str, Enum):

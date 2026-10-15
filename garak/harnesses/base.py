@@ -186,7 +186,7 @@ class Harness(Configurable):
 
         accumulated = TargetCapabilities()
         for plugin_cls in plugin_classes:
-            plugin = plugin_cls(recon_cfg)
+            plugin = plugin_cls({"recon": recon_cfg})
             if not plugin.applicable():
                 continue
             result = plugin.run(target, accumulated)

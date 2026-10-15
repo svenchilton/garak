@@ -161,12 +161,17 @@ def discover_agent_config(
 
 
 def _keyword_match(text: str, keywords) -> bool:
-    """Return True if any keyword appears in *text* (case-insensitive).
+    """Return True if any keyword appears as a word-start in *text* (case-insensitive).
 
+    Uses ``\\bkeyword`` regex so "script" matches "bash script" but not
+    "description", and "eval" matches "eval code" but not "retrieval".
     Accepts both plain strings and ``str``-based enum members as keywords.
     """
     t = text.lower()
-    return any((kw.value if hasattr(kw, "value") else kw) in t for kw in keywords)
+    return any(
+        re.search(r"\b" + re.escape(kw.value if hasattr(kw, "value") else kw), t)
+        for kw in keywords
+    )
 
 
 # ---------------------------------------------------------------------------
