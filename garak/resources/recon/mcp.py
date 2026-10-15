@@ -207,12 +207,15 @@ def mcp_enumerate(
     server_url: str,
     transport: str = "streamable-http",
     timeout: float = 30.0,
+    headers: Optional[dict] = None,
 ) -> List[dict]:
     """Issue a ``tools/list`` JSON-RPC call to an MCP server.
 
     :param server_url: Full URL of the MCP endpoint.
     :param transport: Transport hint; only HTTP is implemented here.
     :param timeout: Request timeout in seconds.
+    :param headers: Optional extra HTTP headers (e.g. ``{"Authorization": "Bearer …"}``).
+        Merged with the default Content-Type / Accept headers; caller values win on conflict.
     :returns: List of raw tool dicts from the server.
     :raises GarakException: On network error, non-2xx response, or invalid JSON.
     """
@@ -225,13 +228,15 @@ def mcp_enumerate(
     payload = json.dumps(
         {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}
     ).encode()
+    merged_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        **(headers or {}),
+    }
     req = urllib.request.Request(
         server_url,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
+        headers=merged_headers,
         method="POST",
     )
     try:
@@ -271,6 +276,7 @@ class MCPReconPlugin(ReconPlugin):
         "server_url": None,
         "transport": "streamable-http",
         "timeout": 30.0,
+        "headers": None,
     }
     priority = 20
 
@@ -286,7 +292,7 @@ class MCPReconPlugin(ReconPlugin):
         current: TargetCapabilities,
     ) -> Optional[TargetCapabilities]:
         try:
-            raw_tools = mcp_enumerate(self.server_url, self.transport, float(self.timeout))
+            raw_tools = mcp_enumerate(self.server_url, self.transport, float(self.timeout), self.headers)
             tool_manifest = build_tool_manifest(
                 {"endpoint": self.server_url, "transport": self.transport},
                 raw_tools,

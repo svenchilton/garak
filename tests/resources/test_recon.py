@@ -296,6 +296,31 @@ def test_mcp_enumerate_network_error():
             mcp_enumerate("http://agent:8080/mcp")
 
 
+def test_mcp_enumerate_custom_headers_sent():
+    """Extra headers are merged with defaults and forwarded to the server."""
+    tools_payload = [{"name": "get_data", "description": "Fetch data."}]
+    mock_response_body = json.dumps(
+        {"jsonrpc": "2.0", "result": {"tools": tools_payload}, "id": 1}
+    ).encode()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = mock_response_body
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.headers)
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        mcp_enumerate("http://agent:8080/mcp", headers={"Authorization": "Bearer tok"})
+
+    assert "Authorization" in captured["headers"], "custom auth header should be forwarded"
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert "Content-type" in captured["headers"], "default Content-Type header should be preserved"
+
+
 # ---------------------------------------------------------------------------
 # load_agent_config
 # ---------------------------------------------------------------------------
@@ -657,6 +682,31 @@ def test_mcp_plugin_run_network_error():
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
         result = MCPReconPlugin(cfg).run(None, TargetCapabilities())
     assert result is None, "MCPReconPlugin should return None on network error"
+
+
+def test_mcp_plugin_forwards_headers():
+    """Headers configured on MCPReconPlugin are forwarded to the MCP server."""
+    tools_payload = [{"name": "get_data", "description": "Fetch data.", "inputSchema": {}, "annotations": {}}]
+    mock_response_body = json.dumps(
+        {"jsonrpc": "2.0", "result": {"tools": tools_payload}, "id": 1}
+    ).encode()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = mock_response_body
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.headers)
+        return mock_resp
+
+    cfg = {"recon": {"mcp": {"server_url": "http://agent:8080/mcp", "headers": {"Authorization": "Bearer tok"}}}}
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        result = MCPReconPlugin(cfg).run(None, TargetCapabilities())
+
+    assert result is not None, "plugin should succeed"
+    assert "Authorization" in captured["headers"], "auth header should reach the server"
 
 
 def test_mcp_plugin_run_security_annotations():
